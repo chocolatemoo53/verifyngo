@@ -70,18 +70,15 @@ func clientIP(r *http.Request, cfg *Config) net.IP {
 		return connectingIP
 	}
 
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			for _, ip := range strings.Split(xff, ",") {
-				trimmed := strings.TrimSpace(ip)
-				parsed := net.ParseIP(trimmed)
-				if parsed != nil {
-					return parsed
-				}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		for _, ip := range strings.Split(xff, ",") {
+			trimmed := strings.TrimSpace(ip)
+			parsed := net.ParseIP(trimmed)
+			if parsed != nil {
+				return parsed
 			}
 		}
-		return connectingIP
 	}
-
 	return connectingIP
 }
 

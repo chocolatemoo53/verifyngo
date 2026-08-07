@@ -187,14 +187,20 @@ type compiledCondition struct {
 	headerVars map[string]string
 }
 
-	if cfg.PolicyFile == "" {
-		return compileLegacyRules(cfg.Rules)
-	}
-	compiled, err := compilePolicyFile(cfg)
+func compilePolicyFile(cfg *Config) ([]compiledRule, error) {
+	raw, err := os.ReadFile(cfg.PolicyFile)
 	if err != nil {
 		return nil, err
 	}
-	return compiled, nil
+	var p policyFile
+	if err := yaml.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+
+	matcher, err := buildPolicyMatcher(cfg, p.Networks)
+	if err != nil {
+		return nil, err
+	}
 
 	resolvedNames := map[string]string{}
 	resolving := map[string]bool{}
