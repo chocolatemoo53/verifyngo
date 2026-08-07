@@ -1,0 +1,53 @@
+networks:
+  huawei-cloud:
+    - asn: 136907
+    - asn: 55990
+    - asn: 138915
+
+  alibaba-cloud:
+    - asn: 24429
+    - asn: 134963
+
+  cloudflare-v4:
+    - url: https://www.cloudflare.com/ips-v4
+
+  private-nets:
+    - prefixes:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+
+rules:
+  - name: allow-home
+    conditions:
+      - 'path == "/"'
+    action: allow
+
+  - name: allow-private
+    conditions:
+      - 'remoteAddress.network("private-nets")'
+    action: pass
+
+  - name: undesired-networks
+    conditions:
+      - 'remoteAddress.network("huawei-cloud") || remoteAddress.network("alibaba-cloud") || remoteAddress.network("cloudflare-v4")'
+    action: drop
+
+  # (stolen from go-away's example)
+
+  - name: drop-aws
+    conditions:
+      - url: https://ip-ranges.amazonaws.com/ip-ranges.json
+        jq-path: '(.prefixes[] | select(has("ip_prefix")) | .ip_prefix), (.prefixes[] | select(has("ipv6_prefix")) | .ipv6_prefix)'
+    action: deny
+
+  - name: always-protected
+    conditions:
+      - 'path == "/sensitive-path"'
+    action: check
+
+  - name: always-protected-again
+    conditions:
+      - 'path == "/sensitive-path-for-alibaba"'
+      - 'remoteAddress.network("alibaba-cloud")'
+    action: challenge

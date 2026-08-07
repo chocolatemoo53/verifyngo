@@ -1,0 +1,33 @@
+body.verifyngo-challenge {
+  background: #0f1115;
+  color: #e6e6e6;
+}
+
+.verifyngo-card {
+  text-align: center;
+  padding: 2.5rem 3rem;
+  border-radius: 12px;
+  background: #181b21;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+}
+
+.verifyngo-logo {
+  max-width: 160px;
+  margin-bottom: 1.25rem;
+}
+
+.verifyngo-title {
+    font-size: 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.verifyngo-message {
+  font-size: 0.95rem;
+  color: #a8adb8;
+  margin-bottom: 1.5rem;
+}
+
+/* Cap's widget renders its own shadow-DOM checkbox; this just constrains its container  */
+cap-widget {
+  display: inline-block;
+}

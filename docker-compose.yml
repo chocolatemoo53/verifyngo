@@ -1,0 +1,42 @@
+services:
+  verifyngo:
+    image: verifyngo
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.json:/config.json:ro
+      - ./static:/static:ro
+      # Use one of the following to load rules/policy:
+      # - ./rules.txt:/rules.txt:ro
+      # - ./policy.yml:/policy.yml:ro
+      - verifyngo-data:/data
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    # depends_on:
+      # - searxng
+      # - redis
+      # - cap
+
+    # searxng:
+    # image: searxng/searxng:latest
+    # expose:
+    #  - "8080"
+    #restart: unless-stopped
+
+  # redis:
+  #   image: redis:7-alpine
+  #   command: ["redis-server", "--save", "", "--appendonly", "yes"]
+  #   volumes:
+  #     - redis-data:/data
+  #   restart: unless-stopped
+
+  # cap:
+  #   image: ghcr.io/tiagozip/cap:latest
+  #   expose:
+  #     - "3000"
+  #   restart: unless-stopped
+
+volumes:
+  verifyngo-data:
+  redis-data:

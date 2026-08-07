@@ -1,0 +1,11 @@
+# One rule per line: <action> <type> <pattern>
+#   action:  allow | challenge | deny
+#   type:    path | ua | cidr
+# First match wins, top to bottom. Falls through to default_action in
+# config.json if nothing matches. Edit this file directly and it's picked
+# up within ~10s -- no restart needed.
+
+allow     path   ^/api/
+deny      ua     python-requests|curl/|Go-http-client
+deny      cidr   185.220.0.0/16
+challenge path   ^/search

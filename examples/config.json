@@ -1,0 +1,118 @@
+{
+  "listen_addr": "127.0.0.1:8080",
+  "upstream_url": "http://127.0.0.1:8886",
+  "cookie_secret": "CHANGE_ME_openssl_rand_hex_32",
+  "cookie_name": "cp_verified",
+  "cookie_ttl": "168h",
+  "provider": "cap",
+  "cap": {
+    "api_url": "https://captcha.example.com",
+    "verify_url": "http://127.0.0.1:3000",
+    "site_key": "your-cap-site-key",
+    "secret_key": "your-cap-secret-key",
+    "widget_script_url": ""
+  },
+  "turnstile": {
+    "site_key": "",
+    "secret_key": ""
+  },
+  "hcaptcha": {
+    "site_key": "",
+    "secret_key": ""
+  },
+  "trust_real_ip": false,
+  "trusted_proxies": [],
+  "static_dir": "/static",
+  "rules_file": "/rules.txt",
+  "policy_file": "",
+  "always_pass_paths": ["^/health$","^/healthz$","^/status$"] ,
+  "asn": {
+    "geoip_db_path": "",
+    "whois_enabled": true,
+    "whois_addr": "whois.radb.net:43",
+    "whois_timeout": "30s",
+    "whois_strict": false
+  },
+  "store": {
+    "backend": "memory",
+    "file": {
+      "path": "/data/store.json",
+      "save_interval": "30s"
+    },
+    "redis": {
+      "addr": "redis:6379",
+      "password": "",
+      "db": 0,
+      "key_prefix": "verifyngo"
+    }
+  },
+  "progressive": {
+    "enabled": false,
+    "passive_paths": [
+      "^/$",
+      "/this-specific-path"
+    ],
+    "passive_ttl": "30m",
+    "max_requests": 50,
+    "request_window": "10m"
+  },
+  "branding": {
+    "logo_url": "/static/logo.svg",
+    "css_url": "/static/custom.css",
+    "title": "My Website",
+    "accent_color": "#444444",
+    "background_color": "#000000",
+    "text_color": "#f2f2f2",
+    "font_family": "'My Font', sans-serif",
+    "font_url": "",
+    "details_text": "This page runs a quick, one-time check to confirm you're a real visitor and not an automated bot. It only takes a moment, and once you've solved it you won't see this again for a while.",
+    "contact_url": "mailto:contact@example.com"
+  },
+  "whitelist": [
+    "203.0.113.10",
+    "198.51.100.0/24"
+  ],
+  "default_action": "challenge",
+  "rules": [
+    {
+      "match": {
+        "path": "^/api/"
+      },
+      "action": "allow"
+    },
+    {
+      "match": {
+        "ua": "python-requests|curl/|Go-http-client"
+      },
+      "action": "deny"
+    },
+    {
+      "match": {
+        "cidr": [
+          "185.220.0.0/16"
+        ]
+      },
+      "action": "deny"
+    },
+    {
+      "match": {
+        "path": "^/search"
+      },
+      "action": "challenge"
+    }
+  ],
+  "walkaway": {
+    "threshold": 10,
+    "ttl": "2h"
+  },
+  "ban": {
+    "duration": "24h"
+  },
+  "abuseipdb": {
+    "enabled": false,
+    "api_key": "",
+    "categories": "19,21",
+    "comment": "verifyngo: exceeded walk-away threshold",
+    "report_after_bans": 3
+  }
+}
