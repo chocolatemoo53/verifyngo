@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -137,6 +138,8 @@ func main() {
 		go watchRulesSource(cfg, rulesBox)
 	}
 	store := newStore(cfg)
+
+	cfg.sliderChallenges = newSliderChallengeStore(cfg.Slider.TTL.Duration, cfg.Slider.MaxChallenges)
 
 	var blacklistBox *atomic.Value
 	if cfg.AbuseIPDB.Blacklist.Enabled {
@@ -325,9 +328,15 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	returnTo := sanitizeReturnPath(r.FormValue("return_to"))
 
 	provider := providerForRequest(cfg, r)
-	verifier := buildVerifierForProvider(cfg, provider)
 
 	log.Printf("verify start ip=%s provider=%s return_to=%s token_len=%d", ip, provider, returnTo, len(token))
+
+	if provider == "slider" {
+		handleSliderVerify(w, r, cfg, store, ip, returnTo)
+		return
+	}
+
+	verifier := buildVerifierForProvider(cfg, provider)
 
 	ok, err := verifier.Verify(token)
 	if err != nil {
@@ -343,6 +352,31 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 
 	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s secure=%v)", ip, provider, cfg.CookieName, isSecureRequest(r, cfg))
 
+	store.ResetWalkaway(ip)
+	setVerifiedCookie(w, r, cfg)
+	clearPassiveCookie(w, r, cfg)
+	log.Printf("redirecting ip=%s to %s", ip, returnTo)
+	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip, returnTo string) {
+	captchaID := r.FormValue("captcha_id")
+	answerStr := r.FormValue("answer")
+	answer, err := strconv.Atoi(answerStr)
+	if err != nil || answer < 0 || answer > 1500 {
+		log.Printf("slider verify failed ip=%s id=%v answer=%q", ip, captchaID, answerStr)
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+
+	ok := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance)
+	if !ok {
+		log.Printf("slider verify failed ip=%s id=%v answer=%d", ip, captchaID, answer)
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+
+	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", ip, cfg.CookieName, isSecureRequest(r, cfg))
 	store.ResetWalkaway(ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)

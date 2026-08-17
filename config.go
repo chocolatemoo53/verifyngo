@@ -58,6 +58,14 @@ type Config struct {
 		SiteKey   string `json:"site_key"`
 		SecretKey string `json:"secret_key"`
 	} `json:"hcaptcha"`
+	Slider struct {
+		Enabled       bool     `json:"enabled"`
+		Tolerance     int      `json:"tolerance"`
+		TTL           Duration `json:"ttl"`
+		MaxChallenges int      `json:"max_challenges"`
+		Width         int      `json:"width"`
+		Height        int      `json:"height"`
+	} `json:"slider"`
 
 	Whitelist     []string `json:"whitelist"`
 	Rules         []Rule   `json:"rules"`
@@ -102,6 +110,7 @@ type Config struct {
 
 	compiledWhitelist      compiledWhitelist
 	compiledTrustedProxies compiledWhitelist
+	sliderChallenges       *sliderChallengeStore
 
 	Store struct {
 		Backend string `json:"backend"`
@@ -204,6 +213,27 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.AbuseIPDB.Blacklist.Enabled && cfg.AbuseIPDB.Blacklist.Refresh.Duration == 0 {
 		cfg.AbuseIPDB.Blacklist.Refresh = Duration{6 * time.Hour}
+	}
+	if cfg.Slider.Tolerance == 0 {
+		cfg.Slider.Tolerance = 8
+	}
+	if cfg.Slider.TTL.Duration == 0 {
+		cfg.Slider.TTL = Duration{10 * time.Minute}
+	}
+	if cfg.Slider.MaxChallenges == 0 {
+		cfg.Slider.MaxChallenges = 5000
+	}
+	if cfg.Slider.Width == 0 {
+		cfg.Slider.Width = 320
+	}
+	if cfg.Slider.Height == 0 {
+		cfg.Slider.Height = 120
+	}
+	if cfg.Slider.Width < 200 {
+		cfg.Slider.Width = 200
+	}
+	if cfg.Slider.Height < 60 {
+		cfg.Slider.Height = 60
 	}
 	if cfg.Branding.AccentColor == "" {
 		cfg.Branding.AccentColor = "#4A90D9"

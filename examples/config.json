@@ -23,6 +23,14 @@
     "site_key": "",
     "secret_key": ""
   },
+  "slider": {
+    "enabled": true,
+    "tolerance": 8,
+    "ttl": "10m",
+    "max_challenges": 5000,
+    "width": 320,
+    "height": 120
+  },
   "trust_real_ip": false,
   "trusted_proxies": [],
   "static_dir": "/static",
