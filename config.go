@@ -78,6 +78,11 @@ type Config struct {
 		Categories      string `json:"categories"`
 		Comment         string `json:"comment"`
 		ReportAfterBans int    `json:"report_after_bans"`
+
+		Blacklist struct {
+			Enabled bool     `json:"enabled"`
+			Refresh Duration `json:"refresh"`
+		} `json:"blacklist"`
 	} `json:"abuseipdb"`
 
 	TrustRealIP    bool     `json:"trust_real_ip"`
@@ -196,6 +201,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.AbuseIPDB.ReportAfterBans == 0 {
 		cfg.AbuseIPDB.ReportAfterBans = 3
+	}
+	if cfg.AbuseIPDB.Blacklist.Enabled && cfg.AbuseIPDB.Blacklist.Refresh.Duration == 0 {
+		cfg.AbuseIPDB.Blacklist.Refresh = Duration{6 * time.Hour}
 	}
 	if cfg.Branding.AccentColor == "" {
 		cfg.Branding.AccentColor = "#4A90D9"

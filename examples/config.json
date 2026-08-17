@@ -116,6 +116,10 @@
     "api_key": "",
     "categories": "19,21",
     "comment": "verifyngo: exceeded walk-away threshold",
-    "report_after_bans": 3
+    "report_after_bans": 3,
+    "blacklist": {
+      "enabled": false,
+      "refresh": "6h"
+    }
   }
 }

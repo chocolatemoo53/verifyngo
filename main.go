@@ -138,6 +138,15 @@ func main() {
 	}
 	store := newStore(cfg)
 
+	var blacklistBox *atomic.Value
+	if cfg.AbuseIPDB.Blacklist.Enabled {
+		if cfg.AbuseIPDB.APIKey == "" {
+			log.Fatal("abuseipdb.blacklist is enabled but abuseipdb.api_key is empty")
+		}
+		blacklistBox = &atomic.Value{}
+		go startBlacklistFetcher(cfg, blacklistBox)
+	}
+
 	passivePaths, err := compileRegexList(cfg.Progressive.PassivePaths)
 	if err != nil {
 		log.Fatalf("progressive.passive_paths: %v", err)
@@ -209,14 +218,14 @@ func main() {
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, cfg, rulesBox.Load().([]compiledRule), passivePaths, bypassPaths, alwaysPassPaths, store, proxy)
+		handleRequest(w, r, cfg, rulesBox.Load().([]compiledRule), passivePaths, bypassPaths, alwaysPassPaths, store, blacklistBox, proxy)
 	})
 
 	log.Printf("listening on %s, proxying to %s (provider=%s)", cfg.ListenAddr, cfg.UpstreamURL, cfg.Provider)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, proxy *httputil.ReverseProxy) {
+func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) {
 	ip := clientIP(r, cfg)
 	if ip == nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -247,6 +256,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	if store.IsBlocked(ipStr) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+
+	if blacklist != nil {
+		if trie, ok := blacklist.Load().(*ipTrie); ok && trie != nil && trie.Contains(ip) {
+			log.Printf("denied %s: on AbuseIPDB blacklist", ipStr)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	action := evaluate(rules, cfg.DefaultAction, r, ip)
