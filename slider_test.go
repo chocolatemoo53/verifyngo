@@ -72,5 +72,8 @@ func TestBuildSliderChallenge(t *testing.T) {
 		if d.Answer < 0 || d.Answer > d.Max {
 			t.Errorf("answer %d out of range [0, %d]", d.Answer, d.Max)
 		}
+		if d.Max > cfg.Slider.Tolerance && d.Answer <= cfg.Slider.Tolerance {
+			t.Errorf("answer %d inside pre-aligned range [0, %d]", d.Answer, cfg.Slider.Tolerance)
+		}
 	}
 }

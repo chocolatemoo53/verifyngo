@@ -145,7 +145,14 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	}
 	answer := 0
 	if max > 0 {
-		answer = rng.Intn(max + 1)
+		// Never let the answer land within tolerance of the start position, or
+		// a bot could just refresh and click Verify until the piece happens to
+		// be pre-aligned (answer in [0, tolerance]).
+		if max > cfg.Slider.Tolerance {
+			answer = cfg.Slider.Tolerance + 1 + rng.Intn(max-cfg.Slider.Tolerance)
+		} else {
+			answer = max
+		}
 	}
 
 	bg := cloneRGBA(scene)
