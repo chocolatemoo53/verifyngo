@@ -162,6 +162,9 @@ func main() {
 		resp.Header.Set("X-Content-Type-Options", "nosniff")
 		resp.Header.Set("X-Frame-Options", "DENY")
 		resp.Header.Set("Referrer-Policy", "no-referrer")
+		if cfg.ResponseCSP != "" && resp.Header.Get("Content-Security-Policy") == "" {
+			resp.Header.Set("Content-Security-Policy", cfg.ResponseCSP)
+		}
 		return nil
 	}
 

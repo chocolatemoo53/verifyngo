@@ -38,6 +38,8 @@ type Config struct {
 	CookieName   string   `json:"cookie_name"`
 	CookieTTL    Duration `json:"cookie_ttl"`
 
+	ResponseCSP string `json:"response_csp"`
+
 	Provider string `json:"provider"`
 	Cap      struct {
 		APIURL          string `json:"api_url"`
@@ -45,6 +47,8 @@ type Config struct {
 		SiteKey         string `json:"site_key"`
 		SecretKey       string `json:"secret_key"`
 		WidgetScriptURL string `json:"widget_script_url"`
+		UseNonce        bool   `json:"use_nonce"`
+		CSP             string `json:"csp"`
 	} `json:"cap"`
 	Turnstile struct {
 		SiteKey   string `json:"site_key"`

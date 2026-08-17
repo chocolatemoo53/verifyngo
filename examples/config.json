@@ -5,12 +5,15 @@
   "cookie_name": "cp_verified",
   "cookie_ttl": "168h",
   "provider": "cap",
+  "response_csp": "",
   "cap": {
     "api_url": "https://captcha.example.com",
     "verify_url": "http://127.0.0.1:3000",
     "site_key": "your-cap-site-key",
     "secret_key": "your-cap-secret-key",
-    "widget_script_url": ""
+    "widget_script_url": "",
+    "use_nonce": false,
+    "csp": ""
   },
   "turnstile": {
     "site_key": "",

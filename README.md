@@ -4,9 +4,9 @@ A bot blocker for simple bots and abusive traffic. Use with your favorite revers
 
 Currently has support for Cap (self hosted captcha), HCaptcha and Turnstile. 
 
-It is planned to add ALTCHA. 
+It is planned to add ALTCHA. Cap provides best privacy currently. 
 
-For best privacy, use Cap. Data is only processed on your server. However, if you set multiple providers, users can switch between them in case of an issue. 
+If you set multiple providers, users can switch between them in case of an issue.
 
 ## Setting it up
 

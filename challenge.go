@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"html/template"
 	"log"
@@ -26,9 +27,15 @@ const challengeTpl = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
-<script src="{{.ScriptURL}}" async defer></script>
+{{if .Nonce}}
+<script nonce="{{.Nonce}}">
+  window.CAP_CSS_NONCE = '{{.Nonce}}';
+  window.CAP_SCRIPT_NONCE = window.CAP_CSS_NONCE;
+</script>
+{{end}}
+<script src="{{.ScriptURL}}" async defer nonce="{{.Nonce}}"></script>
 {{if eq .Provider "hcaptcha"}}
-<script>
+<script nonce="{{.Nonce}}">
   window.hcaptchaOnLoad = function () {
     var renderIfReady = function() {
       if (window.hcaptcha && typeof hcaptcha.render === 'function') {
@@ -56,7 +63,7 @@ const challengeTpl = `<!DOCTYPE html>
 </script>
 {{end}}
 {{if .FontURL}}<link rel="stylesheet" href="{{.FontURL}}">{{end}}
-<style>
+<style nonce="{{.Nonce}}">
   :root {
     --cp-accent: {{.AccentColor}};
     --cp-bg: {{.BackgroundColor}};
@@ -138,6 +145,24 @@ const challengeTpl = `<!DOCTYPE html>
     color: var(--cp-accent);
     text-decoration: underline;
   }
+  .verifyngo-switch-wrap {
+    margin-top: 0.5rem;
+  }
+  .verifyngo-switch {
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+    color: color-mix(in srgb, var(--cp-text) 70%, transparent);
+  }
+  .verifyngo-switch-current {
+    color: var(--cp-accent);
+    font-weight: 600;
+  }
+  .verifyngo-switch a,
+  .verifyngo-switch a:visited {
+    color: var(--cp-accent);
+    text-decoration: underline;
+    margin: 0 0.25rem;
+  }
   @media (max-width: 380px) {
     main.verifyngo-card { padding: 1.5rem 1.25rem; border-radius: 10px; }
     .verifyngo-title { font-size: 1.2rem; }
@@ -155,7 +180,7 @@ const challengeTpl = `<!DOCTYPE html>
   <input type="hidden" id="verifyngo-return-to" value="{{.ReturnTo}}">
   {{if eq .Provider "cap"}}
   <cap-widget id="widget" data-cap-api-endpoint="{{.APIURL}}/{{.SiteKey}}/"></cap-widget>
-  <script>
+  <script nonce="{{.Nonce}}">
     document.getElementById('widget').addEventListener('solve', function(e){
       var f = document.createElement('form');
       f.method = 'POST'; f.action = '/__verify';
@@ -178,7 +203,7 @@ const challengeTpl = `<!DOCTYPE html>
   <form method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
     <div class="cf-turnstile" data-sitekey="{{.SiteKey}}" data-callback="onSolve" data-theme="{{.WidgetTheme}}"></div>
-    <script>function onSolve(token){
+    <script nonce="{{.Nonce}}">function onSolve(token){
       var i=document.createElement('input'); i.type='hidden'; i.name='token'; i.value=token;
       document.currentScript.parentElement.parentElement.appendChild(i);
       document.currentScript.parentElement.parentElement.submit();
@@ -188,7 +213,7 @@ const challengeTpl = `<!DOCTYPE html>
 
   <!-- provider switcher injected when multiple providers available -->
   {{if .ProviderSwitcher}}
-    <div style="margin-top:0.5rem">{{.ProviderSwitcher}}</div>
+    <div class="verifyngo-switch-wrap">{{.ProviderSwitcher}}</div>
   {{end}}
 
   </div>
@@ -217,10 +242,10 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	available := availableProviders(cfg)
 	if len(available) > 1 {
 		var b strings.Builder
-		b.WriteString("<div style='margin-top:0.75rem;font-size:0.9rem;color:var(--cp-text);opacity:0.85'>Switch captcha: ")
-		for i, p := range available {
+		b.WriteString("<div class=\"verifyngo-switch\"><span class=\"verifyngo-switch-label\">Switch captcha:</span>")
+		for _, p := range available {
 			if p == provider {
-				b.WriteString("<strong style='color:var(--cp-accent)'>")
+				b.WriteString("<strong class=\"verifyngo-switch-current\">")
 				b.WriteString(p)
 				b.WriteString("</strong>")
 			} else {
@@ -229,18 +254,27 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 					RawQuery: "provider=" + url.QueryEscape(p) + "&return_to=" + url.QueryEscape(requestURI),
 				}
 
-				b.WriteString("<a href=\"")
+				b.WriteString(" <a href=\"")
 				b.WriteString(u.String())
-				b.WriteString("\" style='color:var(--cp-accent);text-decoration:underline;margin:0 0.25rem;'>")
+				b.WriteString("\">")
 				b.WriteString(p)
 				b.WriteString("</a>")
-			}
-			if i < len(available)-1 {
-				b.WriteString(" ")
 			}
 		}
 		b.WriteString("</div>")
 		switcher = template.HTML(b.String())
+	}
+
+	scriptURL := scriptURLForRequest(cfg, r)
+
+	nonce := ""
+	if cfg.Cap.UseNonce {
+		n, err := cspNonce()
+		if err != nil {
+			log.Printf("nonce: %v", err)
+		} else {
+			nonce = n
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -248,10 +282,13 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	if nonce != "" {
+		w.Header().Set("Content-Security-Policy", buildCSP(cfg, nonce, scriptURL))
+	}
 	w.WriteHeader(http.StatusOK)
 	_ = tpl.Execute(w, map[string]interface{}{
 		"Provider":         provider,
-		"ScriptURL":        scriptURLForRequest(cfg, r),
+		"ScriptURL":        scriptURL,
 		"APIURL":           apiURL,
 		"SiteKey":          siteKeyForRequest(cfg, r),
 		"LogoURL":          cfg.Branding.LogoURL,
@@ -269,7 +306,63 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		"ReturnTo":         requestURI,
 		"ProviderSwitcher": switcher,
 		"WidgetTheme":      widgetTheme(cfg.Branding.BackgroundColor),
+		"Nonce":            nonce,
 	})
+}
+
+func cspNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawStdEncoding.EncodeToString(b), nil
+}
+
+func addOrigin(srcs []string, u string) []string {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return srcs
+	}
+	o := parsed.Scheme + "://" + parsed.Host
+	for _, s := range srcs {
+		if s == o {
+			return srcs
+		}
+	}
+	return append(srcs, o)
+}
+
+func buildCSP(cfg *Config, nonce, scriptURL string) string {
+	if cfg.Cap.CSP != "" {
+		return strings.ReplaceAll(cfg.Cap.CSP, "{nonce}", nonce)
+	}
+
+	script := []string{"'nonce-" + nonce + "'", "'strict-dynamic'", "'wasm-unsafe-eval'"}
+	style := []string{"'nonce-" + nonce + "'"}
+	img := []string{"'self'", "data:", "blob:"}
+	font := []string{"'self'", "data:"}
+	connect := []string{"'self'", "https://cdn.jsdelivr.net"}
+
+	script = addOrigin(script, scriptURL)
+	connect = addOrigin(connect, scriptURL)
+	connect = addOrigin(connect, cfg.Cap.APIURL)
+	connect = addOrigin(connect, cfg.Cap.VerifyURL)
+	style = addOrigin(style, cfg.Branding.CSSURL)
+	font = addOrigin(font, cfg.Branding.FontURL)
+	img = addOrigin(img, cfg.Branding.LogoURL)
+
+	return strings.Join([]string{
+		"default-src 'none'",
+		"script-src " + strings.Join(script, " "),
+		"style-src " + strings.Join(style, " "),
+		"img-src " + strings.Join(img, " "),
+		"font-src " + strings.Join(font, " "),
+		"connect-src " + strings.Join(connect, " "),
+		"base-uri 'self'",
+		"form-action 'self'",
+		"frame-ancestors 'none'",
+		"object-src 'none'",
+	}, "; ")
 }
 
 func widgetTheme(bgHex string) string {
