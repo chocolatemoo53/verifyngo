@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -138,6 +139,17 @@ func main() {
 	}
 	store := newStore(cfg)
 
+	cfg.sliderChallenges = newSliderChallengeStore(cfg.Slider.TTL.Duration, cfg.Slider.MaxChallenges)
+
+	var blacklistBox *atomic.Value
+	if cfg.AbuseIPDB.Blacklist.Enabled {
+		if cfg.AbuseIPDB.APIKey == "" {
+			log.Fatal("abuseipdb.blacklist is enabled but abuseipdb.api_key is empty")
+		}
+		blacklistBox = &atomic.Value{}
+		go startBlacklistFetcher(cfg, blacklistBox)
+	}
+
 	passivePaths, err := compileRegexList(cfg.Progressive.PassivePaths)
 	if err != nil {
 		log.Fatalf("progressive.passive_paths: %v", err)
@@ -209,14 +221,14 @@ func main() {
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, cfg, rulesBox.Load().([]compiledRule), passivePaths, bypassPaths, alwaysPassPaths, store, proxy)
+		handleRequest(w, r, cfg, rulesBox.Load().([]compiledRule), passivePaths, bypassPaths, alwaysPassPaths, store, blacklistBox, proxy)
 	})
 
 	log.Printf("listening on %s, proxying to %s (provider=%s)", cfg.ListenAddr, cfg.UpstreamURL, cfg.Provider)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, proxy *httputil.ReverseProxy) {
+func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) {
 	ip := clientIP(r, cfg)
 	if ip == nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -247,6 +259,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	if store.IsBlocked(ipStr) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+
+	if blacklist != nil {
+		if trie, ok := blacklist.Load().(*ipTrie); ok && trie != nil && trie.Contains(ip) {
+			log.Printf("denied %s: on AbuseIPDB blacklist", ipStr)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	action := evaluate(rules, cfg.DefaultAction, r, ip)
@@ -308,9 +328,15 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	returnTo := sanitizeReturnPath(r.FormValue("return_to"))
 
 	provider := providerForRequest(cfg, r)
-	verifier := buildVerifierForProvider(cfg, provider)
 
 	log.Printf("verify start ip=%s provider=%s return_to=%s token_len=%d", ip, provider, returnTo, len(token))
+
+	if provider == "slider" {
+		handleSliderVerify(w, r, cfg, store, ip, returnTo)
+		return
+	}
+
+	verifier := buildVerifierForProvider(cfg, provider)
 
 	ok, err := verifier.Verify(token)
 	if err != nil {
@@ -326,6 +352,31 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 
 	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s secure=%v)", ip, provider, cfg.CookieName, isSecureRequest(r, cfg))
 
+	store.ResetWalkaway(ip)
+	setVerifiedCookie(w, r, cfg)
+	clearPassiveCookie(w, r, cfg)
+	log.Printf("redirecting ip=%s to %s", ip, returnTo)
+	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip, returnTo string) {
+	captchaID := r.FormValue("captcha_id")
+	answerStr := r.FormValue("answer")
+	answer, err := strconv.Atoi(answerStr)
+	if err != nil || answer < 0 || answer > 1500 {
+		log.Printf("slider verify failed ip=%s id=%v answer=%q", ip, captchaID, answerStr)
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+
+	ok := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance)
+	if !ok {
+		log.Printf("slider verify failed ip=%s id=%v answer=%d", ip, captchaID, answer)
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+
+	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", ip, cfg.CookieName, isSecureRequest(r, cfg))
 	store.ResetWalkaway(ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)

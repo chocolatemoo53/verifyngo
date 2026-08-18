@@ -2,11 +2,36 @@
 
 A bot blocker for simple bots and abusive traffic. Use with your favorite reverse proxy!
 
-Currently has support for Cap (self hosted captcha), HCaptcha and Turnstile. 
+Currently has support for Cap (self hosted captcha), HCaptcha, Turnstile, and a self-hosted JS-free slider puzzle. 
 
 It is planned to add ALTCHA. Cap provides best privacy currently. 
 
 If you set multiple providers, users can switch between them in case of an issue.
+
+## Slider puzzle
+
+The `slider` provider is a self-contained, JavaScript-free challenge. Every request gets a procedurally generated "particle" scene (no external assets) with a target slot cut into it, plus a matching puzzle piece rendered as the native range-input thumb. The visitor drags the piece to line it up with the slot and submits a plain HTML form — the server compares the submitted position against the stored answer.
+
+```json
+"slider": {
+  "enabled": true,
+  "tolerance": 8,
+  "ttl": "10m",
+  "max_challenges": 5000,
+  "width": 320,
+  "height": 120
+}
+```
+
+- `enabled` — makes the provider selectable (as the default or via the switcher)
+- `tolerance` — allowed deviation in pixels between the answer and the submitted position (default 8)
+- `ttl` — how long a generated challenge stays valid before it expires (default 10m)
+- `max_challenges` — cap on pending challenges held in memory (default 5000)
+- `width`/`height` — rendered canvas size in pixels (default 320x120)
+
+Each challenge is single-use and only valid for its TTL. Answers are kept in memory; with a multi-instance deployment, sticky sessions (or a shared store) are required.
+
+Because the scene is served as a data URI, make sure the challenge page CSP allows `data:` images. The default CSP already does; if you override `cap.csp`, keep `img-src ... data:`.
 
 ## Setting it up
 

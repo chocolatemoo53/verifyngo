@@ -33,7 +33,7 @@ const challengeTpl = `<!DOCTYPE html>
   window.CAP_SCRIPT_NONCE = window.CAP_CSS_NONCE;
 </script>
 {{end}}
-<script src="{{.ScriptURL}}" async defer nonce="{{.Nonce}}"></script>
+{{if .ScriptURL}}<script src="{{.ScriptURL}}" async defer nonce="{{.Nonce}}"></script>{{end}}
 {{if eq .Provider "hcaptcha"}}
 <script nonce="{{.Nonce}}">
   window.hcaptchaOnLoad = function () {
@@ -163,6 +163,18 @@ const challengeTpl = `<!DOCTYPE html>
     text-decoration: underline;
     margin: 0 0.25rem;
   }
+  .verifyngo-submit {
+    margin-top: 1rem;
+    padding: 0.7rem 1.6rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--cp-accent);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .verifyngo-submit:hover { filter: brightness(1.1); }
   @media (max-width: 380px) {
     main.verifyngo-card { padding: 1.5rem 1.25rem; border-radius: 10px; }
     .verifyngo-title { font-size: 1.2rem; }
@@ -198,6 +210,64 @@ const challengeTpl = `<!DOCTYPE html>
   <form id="hcaptcha-form" method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
     <div id="hcaptcha-el"></div>
+  </form>
+  {{else if eq .Provider "slider"}}
+  <style nonce="{{.Nonce}}">
+    .verifyngo-slider {
+      position: relative;
+      max-width: {{.SliderWidth}}px;
+      margin: 0 auto;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .verifyngo-slider-img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .verifyngo-range {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      cursor: pointer;
+    }
+    .verifyngo-range::-webkit-slider-runnable-track {
+      height: 100%;
+      background: transparent;
+    }
+    .verifyngo-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 100%;
+      width: {{.SliderPieceW}}px;
+      background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
+    }
+    .verifyngo-range::-moz-range-track {
+      height: 100%;
+      background: transparent;
+    }
+    .verifyngo-range::-moz-range-thumb {
+      height: 100%;
+      width: {{.SliderPieceW}}px;
+      border: none;
+      border-radius: 0;
+      background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
+    }
+  </style>
+  <form id="slider-form" method="POST" action="/__verify">
+    <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    <input type="hidden" name="captcha_id" value="{{.SliderChallengeID}}">
+    <div class="verifyngo-slider">
+      <img class="verifyngo-slider-img" src="{{.SliderBg}}" alt="Move the piece to the marked slot">
+      <input type="range" class="verifyngo-range" name="answer" min="0" max="{{.SliderMax}}" step="1" value="0">
+    </div>
+    <p class="verifyngo-status">Drag the piece so it lines up with the slot</p>
+    <button type="submit" class="verifyngo-submit">Verify</button>
   </form>
   {{else}}
   <form method="POST" action="/__verify">
@@ -267,6 +337,31 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 
 	scriptURL := scriptURLForRequest(cfg, r)
 
+	sliderID := ""
+	sliderBg := ""
+	sliderPiece := ""
+	sliderPieceW := 0
+	sliderMax := 0
+	sliderWidth := cfg.Slider.Width
+	if provider == "slider" {
+		data, err := buildSliderChallenge(cfg)
+		if err != nil {
+			log.Printf("slider: build challenge: %v", err)
+		} else {
+			challengeID, err := cfg.sliderChallenges.issue(data.Answer)
+			if err != nil {
+				log.Printf("slider: issue challenge: %v", err)
+			} else {
+				sliderID = challengeID
+				sliderBg = data.BgDataURI
+				sliderPiece = data.PieceDataURI
+				sliderPieceW = data.PieceWidth
+				sliderMax = data.Max
+				sliderWidth = data.Width
+			}
+		}
+	}
+
 	nonce := ""
 	if cfg.Cap.UseNonce {
 		n, err := cspNonce()
@@ -307,6 +402,12 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		"ProviderSwitcher": switcher,
 		"WidgetTheme":      widgetTheme(cfg.Branding.BackgroundColor),
 		"Nonce":            nonce,
+		"SliderChallengeID": sliderID,
+		"SliderBg":          template.URL(sliderBg),
+		"SliderPiece":       template.URL(sliderPiece),
+		"SliderPieceW":      sliderPieceW,
+		"SliderMax":         sliderMax,
+		"SliderWidth":       sliderWidth,
 	})
 }
 
@@ -413,6 +514,10 @@ func providerForRequest(cfg *Config, r *http.Request) string {
 			if cfg.HCaptcha.SiteKey != "" {
 				return "hcaptcha"
 			}
+		case "slider":
+			if cfg.Slider.Enabled {
+				return "slider"
+			}
 		}
 	}
 	if cfg.Provider != "" {
@@ -423,6 +528,9 @@ func providerForRequest(cfg *Config, r *http.Request) string {
 	}
 	if cfg.HCaptcha.SiteKey != "" {
 		return "hcaptcha"
+	}
+	if cfg.Slider.Enabled {
+		return "slider"
 	}
 	return "turnstile"
 }
@@ -438,6 +546,9 @@ func availableProviders(cfg *Config) []string {
 	if cfg.HCaptcha.SiteKey != "" {
 		out = append(out, "hcaptcha")
 	}
+	if cfg.Slider.Enabled {
+		out = append(out, "slider")
+	}
 	return out
 }
 
@@ -451,6 +562,8 @@ func scriptURLForRequest(cfg *Config, r *http.Request) string {
 	case "hcaptcha":
 		h := &providers.HCaptcha{}
 		return h.WidgetScriptURL()
+	case "slider":
+		return ""
 	default:
 		t := &providers.Turnstile{}
 		return t.WidgetScriptURL()
@@ -463,6 +576,8 @@ func siteKeyForRequest(cfg *Config, r *http.Request) string {
 		return cfg.Cap.SiteKey
 	case "hcaptcha":
 		return cfg.HCaptcha.SiteKey
+	case "slider":
+		return ""
 	default:
 		return cfg.Turnstile.SiteKey
 	}

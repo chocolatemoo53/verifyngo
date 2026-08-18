@@ -23,6 +23,14 @@
     "site_key": "",
     "secret_key": ""
   },
+  "slider": {
+    "enabled": true,
+    "tolerance": 8,
+    "ttl": "10m",
+    "max_challenges": 5000,
+    "width": 320,
+    "height": 120
+  },
   "trust_real_ip": false,
   "trusted_proxies": [],
   "static_dir": "/static",
@@ -116,6 +124,10 @@
     "api_key": "",
     "categories": "19,21",
     "comment": "verifyngo: exceeded walk-away threshold",
-    "report_after_bans": 3
+    "report_after_bans": 3,
+    "blacklist": {
+      "enabled": false,
+      "refresh": "6h"
+    }
   }
 }
