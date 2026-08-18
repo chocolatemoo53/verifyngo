@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"html/template"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -23,7 +24,7 @@ func requestID() string {
 }
 
 const challengeTpl = `<!DOCTYPE html>
-<html><head>
+<html lang="{{.Lang}}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
@@ -71,6 +72,11 @@ const challengeTpl = `<!DOCTYPE html>
     --cp-font: {{.FontFamily}};
   }
   * { box-sizing: border-box; }
+  button, input, select, textarea { font-family: inherit; }
+  :focus-visible {
+    outline: 2px solid var(--cp-accent);
+    outline-offset: 2px;
+  }
   html, body {
     margin: 0;
     padding: 0;
@@ -88,6 +94,7 @@ const challengeTpl = `<!DOCTYPE html>
     padding: 1.25rem;
   }
   main.verifyngo-card {
+    position: relative;
     width: 100%;
     max-width: 30rem;
     text-align: center;
@@ -111,7 +118,7 @@ const challengeTpl = `<!DOCTYPE html>
   .verifyngo-status {
     font-size: 0.95rem;
     line-height: 1.5;
-    color: color-mix(in srgb, var(--cp-text) 85%, transparent);
+    color: var(--cp-text);
     margin: 0 0 1rem;
   }
   .verifyngo-status em { color: var(--cp-accent); font-style: normal; }
@@ -126,7 +133,7 @@ const challengeTpl = `<!DOCTYPE html>
     text-align: left;
     margin: 1.25rem 0 0.5rem;
     font-size: 0.85rem;
-    color: color-mix(in srgb, var(--cp-text) 70%, transparent);
+    color: var(--cp-text);
   }
   details.verifyngo-details summary {
     cursor: pointer;
@@ -138,7 +145,7 @@ const challengeTpl = `<!DOCTYPE html>
     text-align: center;
     margin-top: 1rem;
     font-size: 0.8rem;
-    color: color-mix(in srgb, var(--cp-text) 55%, transparent);
+    color: var(--cp-text);
   }
   footer.verifyngo-footer a,
   footer.verifyngo-footer a:visited {
@@ -151,24 +158,45 @@ const challengeTpl = `<!DOCTYPE html>
   .verifyngo-switch {
     margin-top: 0.75rem;
     font-size: 0.9rem;
-    color: color-mix(in srgb, var(--cp-text) 70%, transparent);
+    color: var(--cp-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .verifyngo-switch-label {
+    margin-right: 0.25rem;
+  }
+  .verifyngo-switch-current,
+  .verifyngo-switch a,
+  .verifyngo-switch a:visited {
+    display: inline-block;
+    min-width: 5.5rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 999px;
+    text-align: center;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-decoration: none;
   }
   .verifyngo-switch-current {
-    color: var(--cp-accent);
-    font-weight: 600;
+    color: {{.AccentTextColor}};
+    background: var(--cp-accent);
   }
   .verifyngo-switch a,
   .verifyngo-switch a:visited {
     color: var(--cp-accent);
-    text-decoration: underline;
-    margin: 0 0.25rem;
+    border: 1px solid var(--cp-accent);
   }
   .verifyngo-submit {
     margin-top: 1rem;
     padding: 0.7rem 1.6rem;
     font-size: 1rem;
     font-weight: 600;
-    color: #fff;
+    color: {{.AccentTextColor}};
     background: var(--cp-accent);
     border: none;
     border-radius: 8px;
@@ -184,11 +212,11 @@ const challengeTpl = `<!DOCTYPE html>
 {{if .CSSURL}}<link rel="stylesheet" href="{{.CSSURL}}">{{end}}
 </head><body class="verifyngo-challenge">
 <main class="verifyngo-card">
-  {{if .LogoURL}}<img class="verifyngo-logo" src="{{.LogoURL}}" alt="{{.Title}}">{{end}}
+  {{if .LogoURL}}<img class="verifyngo-logo" src="{{.LogoURL}}" alt="">{{end}}
   <h1 class="verifyngo-title">{{if .Title}}{{.Title}}{{else}}Checking you are not a bot{{end}}</h1>
   <p class="verifyngo-status">Please complete the <em>{{.ChallengeName}}</em> challenge below to verify you are not a bot...</p>
 
-  <div class="verifyngo-widget">
+  <div class="verifyngo-widget" role="group" aria-label="Captcha challenge">
   <input type="hidden" id="verifyngo-return-to" value="{{.ReturnTo}}">
   {{if eq .Provider "cap"}}
   <cap-widget id="widget" data-cap-api-endpoint="{{.APIURL}}/{{.SiteKey}}/"></cap-widget>
@@ -275,8 +303,8 @@ const challengeTpl = `<!DOCTYPE html>
     <div class="cf-turnstile" data-sitekey="{{.SiteKey}}" data-callback="onSolve" data-theme="{{.WidgetTheme}}"></div>
     <script nonce="{{.Nonce}}">function onSolve(token){
       var i=document.createElement('input'); i.type='hidden'; i.name='token'; i.value=token;
-      document.currentScript.parentElement.parentElement.appendChild(i);
-      document.currentScript.parentElement.parentElement.submit();
+      document.currentScript.parentElement.appendChild(i);
+      document.currentScript.parentElement.submit();
     }</script>
   </form>
   {{end}}
@@ -295,6 +323,8 @@ const challengeTpl = `<!DOCTYPE html>
 </main>
 <footer class="verifyngo-footer">
   Request Id <em>{{.RequestID}}</em>{{if .ContactURL}} | <a href="{{.ContactURL}}">Contact</a>{{end}}
+  {{if eq .Provider "turnstile"}}<br>Protected by Cloudflare Turnstile · <a href="https://www.cloudflare.com/privacypolicy/">Privacy</a> · <a href="https://www.cloudflare.com/terms/">Terms</a>{{end}}
+  {{if eq .Provider "hcaptcha"}}<br>Protected by hCaptcha · <a href="https://www.hcaptcha.com/privacy">Privacy</a> · <a href="https://www.hcaptcha.com/terms">Terms</a>{{end}}
 </footer>
 </body></html>`
 
@@ -382,26 +412,28 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	}
 	w.WriteHeader(http.StatusOK)
 	_ = tpl.Execute(w, map[string]interface{}{
-		"Provider":         provider,
-		"ScriptURL":        scriptURL,
-		"APIURL":           apiURL,
-		"SiteKey":          siteKeyForRequest(cfg, r),
-		"LogoURL":          cfg.Branding.LogoURL,
-		"CSSURL":           cfg.Branding.CSSURL,
-		"Title":            cfg.Branding.Title,
-		"AccentColor":      cfg.Branding.AccentColor,
-		"BackgroundColor":  cfg.Branding.BackgroundColor,
-		"TextColor":        cfg.Branding.TextColor,
-		"FontFamily":       cfg.Branding.FontFamily,
-		"FontURL":          cfg.Branding.FontURL,
-		"DetailsText":      cfg.Branding.DetailsText,
-		"ContactURL":       cfg.Branding.ContactURL,
-		"RequestID":        id,
-		"ChallengeName":    provider,
-		"ReturnTo":         requestURI,
-		"ProviderSwitcher": switcher,
-		"WidgetTheme":      widgetTheme(cfg.Branding.BackgroundColor),
-		"Nonce":            nonce,
+		"Provider":          provider,
+		"ScriptURL":         scriptURL,
+		"APIURL":            apiURL,
+		"SiteKey":           siteKeyForRequest(cfg, r),
+		"LogoURL":           cfg.Branding.LogoURL,
+		"CSSURL":            cfg.Branding.CSSURL,
+		"Title":             cfg.Branding.Title,
+		"AccentColor":       cfg.Branding.AccentColor,
+		"BackgroundColor":   cfg.Branding.BackgroundColor,
+		"TextColor":         cfg.Branding.TextColor,
+		"FontFamily":        cfg.Branding.FontFamily,
+		"FontURL":           cfg.Branding.FontURL,
+		"DetailsText":       cfg.Branding.DetailsText,
+		"ContactURL":        cfg.Branding.ContactURL,
+		"Lang":              cfg.Branding.Lang,
+		"RequestID":         id,
+		"ChallengeName":     provider,
+		"ReturnTo":          requestURI,
+		"ProviderSwitcher":  switcher,
+		"WidgetTheme":       widgetTheme(cfg.Branding.BackgroundColor),
+		"AccentTextColor":   accentTextColor(cfg.Branding.AccentColor),
+		"Nonce":             nonce,
 		"SliderChallengeID": sliderID,
 		"SliderBg":          template.URL(sliderBg),
 		"SliderPiece":       template.URL(sliderPiece),
@@ -464,6 +496,40 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 		"frame-ancestors 'none'",
 		"object-src 'none'",
 	}, "; ")
+}
+
+// relativeLuminance returns the WCAG relative luminance of a #rrggbb color.
+func relativeLuminance(hex string) (float64, bool) {
+	hex = strings.TrimPrefix(hex, "#")
+	if len(hex) != 6 {
+		return 0, false
+	}
+	r, err1 := strconv.ParseInt(hex[0:2], 16, 0)
+	g, err2 := strconv.ParseInt(hex[2:4], 16, 0)
+	b, err3 := strconv.ParseInt(hex[4:6], 16, 0)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return 0, false
+	}
+	lin := func(c float64) float64 {
+		c /= 255
+		if c <= 0.03928 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(float64(r)) + 0.7152*lin(float64(g)) + 0.0722*lin(float64(b)), true
+}
+
+// accentTextColor picks white or black so text on the accent keeps >= 4.5:1.
+func accentTextColor(accentHex string) string {
+	l, ok := relativeLuminance(accentHex)
+	if !ok {
+		return "#ffffff"
+	}
+	if l < 0.183 {
+		return "#ffffff"
+	}
+	return "#000000"
 }
 
 func widgetTheme(bgHex string) string {

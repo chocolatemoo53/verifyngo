@@ -152,6 +152,7 @@ type Config struct {
 		Title       string `json:"title"`
 		DetailsText string `json:"details_text"`
 		ContactURL  string `json:"contact_url"`
+		Lang        string `json:"lang"`
 	}
 }
 
@@ -249,6 +250,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Branding.DetailsText == "" {
 		cfg.Branding.DetailsText = "This page runs a quick, one-time check to confirm you're a real visitor and not an automated bot. It only takes a moment, and once you've solved it you won't see this again for a while."
+	}
+	if cfg.Branding.Lang == "" {
+		cfg.Branding.Lang = "en"
 	}
 	cfg.compiledWhitelist = compileWhitelist(cfg.Whitelist)
 	cfg.compiledTrustedProxies = compileWhitelist(cfg.TrustedProxies)

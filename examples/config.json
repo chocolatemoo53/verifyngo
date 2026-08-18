@@ -77,7 +77,8 @@
     "font_family": "'My Font', sans-serif",
     "font_url": "",
     "details_text": "This page runs a quick, one-time check to confirm you're a real visitor and not an automated bot. It only takes a moment, and once you've solved it you won't see this again for a while.",
-    "contact_url": "mailto:contact@example.com"
+    "contact_url": "mailto:contact@example.com",
+    "lang": "en"
   },
   "whitelist": [
     "203.0.113.10",
