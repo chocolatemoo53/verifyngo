@@ -72,20 +72,28 @@ func TestClientIPRightToLeft(t *testing.T) {
 	}
 
 	// Spoofed leftmost entry is ignored; the rightmost untrusted IP wins.
-	if got := clientIP(newReq("10.0.0.1:1000", "1.2.3.4, 203.0.113.9"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
+	if got, _ := clientIP(newReq("10.0.0.1:1000", "1.2.3.4, 203.0.113.9"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
 		t.Errorf("spoofed chain: got %s, want 203.0.113.9", got)
 	}
 	// Single entry from a trusted proxy is the client.
-	if got := clientIP(newReq("10.0.0.1:1000", "203.0.113.9"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
+	if got, _ := clientIP(newReq("10.0.0.1:1000", "203.0.113.9"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
 		t.Errorf("single entry: got %s, want 203.0.113.9", got)
 	}
 	// Trusted chain is popped right-to-left.
-	if got := clientIP(newReq("10.0.0.1:1000", "203.0.113.9, 10.0.0.1"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
+	if got, _ := clientIP(newReq("10.0.0.1:1000", "203.0.113.9, 10.0.0.1"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
 		t.Errorf("trusted chain: got %s, want 203.0.113.9", got)
 	}
 	// Connection from a non-trusted peer: XFF is ignored entirely.
-	if got := clientIP(newReq("192.0.2.50:1000", "1.2.3.4"), cfg); !got.Equal(net.ParseIP("192.0.2.50")) {
+	if got, _ := clientIP(newReq("192.0.2.50:1000", "1.2.3.4"), cfg); !got.Equal(net.ParseIP("192.0.2.50")) {
 		t.Errorf("untrusted peer: got %s, want 192.0.2.50", got)
+	}
+	// Trusted proxy without XFF: IP resolved but marked unresolved (Tor hidden service).
+	got, resolved := clientIP(newReq("10.0.0.1:1000", ""), cfg)
+	if !got.Equal(net.ParseIP("10.0.0.1")) {
+		t.Errorf("proxy no-xff: got %s, want 10.0.0.1", got)
+	}
+	if resolved {
+		t.Error("proxy without XFF should be unresolved")
 	}
 }
 

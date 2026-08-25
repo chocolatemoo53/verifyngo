@@ -50,7 +50,13 @@ func watchRulesSource(cfg *Config, box *atomic.Value) {
 	}
 }
 
-func clientIP(r *http.Request, cfg *Config) net.IP {
+// clientIP returns the client IP and whether it was resolved from an
+// X-Forwarded-For header (true) or fell back to the connecting IP (false).
+// When trust_real_ip is enabled and the connecting IP is a trusted proxy but
+// no XFF header is present (e.g. Tor hidden service), resolved is false — the
+// caller should skip walkaway/ban tracking for such requests since the real
+// client IP is unknown.
+func clientIP(r *http.Request, cfg *Config) (net.IP, bool) {
 	connectingIP := func() net.IP {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
@@ -60,11 +66,11 @@ func clientIP(r *http.Request, cfg *Config) net.IP {
 	}()
 
 	if !cfg.TrustRealIP {
-		return connectingIP
+		return connectingIP, true
 	}
 
 	if !cfg.compiledTrustedProxies.contains(connectingIP) {
-		return connectingIP
+		return connectingIP, true
 	}
 
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -77,10 +83,11 @@ func clientIP(r *http.Request, cfg *Config) net.IP {
 			if i > 0 && cfg.compiledTrustedProxies.contains(parsed) {
 				continue
 			}
-			return parsed
+			return parsed, true
 		}
 	}
-	return connectingIP
+	// Trusted proxy but no XFF — real IP unknown (e.g. Tor hidden service).
+	return connectingIP, false
 }
 
 func stripQuery(uri string) string {
@@ -281,7 +288,7 @@ func main() {
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) {
-	ip := clientIP(r, cfg)
+	ip, resolved := clientIP(r, cfg)
 	if ip == nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -356,6 +363,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		}
 	}
 
+	// When the connecting IP is a trusted proxy but no X-Forwarded-For was
+	// present (e.g. Tor hidden service), the real client IP is unknown.
+	// Skip walkaway/ban tracking to avoid banning the proxy IP and blocking
+	// all traffic through that proxy.  The challenge is still served so the
+	// user must solve the captcha and receive a cookie.
+	if !resolved {
+		requestURI := r.URL.RequestURI()
+		log.Printf("unresolved proxy %s: serving challenge without walkaway tracking (%s)", logIP(cfg, ip), sanitizeForLog(stripQuery(requestURI)))
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), stripQuery(requestURI), true)
+		return
+	}
+
 	requestURI := r.URL.RequestURI()
 	count := store.IncrWalkaway(ipStr, cfg.Walkaway.TTL.Duration)
 	store.LogPath(ipStr, stripQuery(requestURI))
@@ -386,7 +405,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 		return
 	}
 	token := r.FormValue("token")
-	ip := clientIP(r, cfg)
+	ip, _ := clientIP(r, cfg)
 	ipStr := ip.String()
 	returnTo := sanitizeReturnPath(r.FormValue("return_to"))
 

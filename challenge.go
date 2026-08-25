@@ -478,7 +478,7 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 		return strings.ReplaceAll(cfg.Cap.CSP, "{nonce}", nonce)
 	}
 
-	script := []string{"'nonce-" + nonce + "'", "'strict-dynamic'", "'wasm-unsafe-eval'"}
+	script := []string{"'nonce-" + nonce + "'", "'strict-dynamic'", "'wasm-unsafe-eval'", "'unsafe-eval'"}
 	style := []string{"'nonce-" + nonce + "'"}
 	img := []string{"'self'", "data:", "blob:"}
 	font := []string{"'self'", "data:"}
@@ -492,7 +492,7 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 	font = addOrigin(font, cfg.Branding.FontURL)
 	img = addOrigin(img, cfg.Branding.LogoURL)
 
-	frame := []string{"https://challenges.cloudflare.com", "https://hcaptcha.com", "https://newassets.hcaptcha.com"}
+	frame := []string{"'self'", "blob:", "data:", "https://challenges.cloudflare.com", "https://hcaptcha.com", "https://newassets.hcaptcha.com"}
 	frame = addOrigin(frame, scriptURL)
 	frame = addOrigin(frame, cfg.Cap.APIURL)
 	worker := []string{"'self'", "blob:", "data:"}
