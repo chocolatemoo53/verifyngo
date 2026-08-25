@@ -46,7 +46,6 @@ func verifyCookie(secret, value string, expectedScope string) bool {
 
 	switch len(parts) {
 	case 2:
-		// Legacy cookies: expiry.signature
 		if expectedScope != cookieScopeFull {
 			return false
 		}
@@ -55,7 +54,6 @@ func verifyCookie(secret, value string, expectedScope string) bool {
 		sigHex = parts[1]
 
 	case 3:
-		// Current cookies: expiry.scope.signature
 		expiry = parts[0]
 		scope = parts[1]
 		sigHex = parts[2]

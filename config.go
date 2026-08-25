@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -37,6 +38,10 @@ type Config struct {
 	CookieSecret string   `json:"cookie_secret"`
 	CookieName   string   `json:"cookie_name"`
 	CookieTTL    Duration `json:"cookie_ttl"`
+
+	// AnonymizeIPs truncates IPs in logs to /24 (IPv4) and /48 (IPv6) and
+	// disables AbuseIPDB reporting. Defaults to true when omitted.
+	AnonymizeIPs *bool `json:"anonymize_ips"`
 
 	ResponseCSP string `json:"response_csp"`
 
@@ -138,6 +143,14 @@ type Config struct {
 
 	BypassPaths     []string `json:"bypass_paths"`
 	AlwaysPassPaths []string `json:"always_pass_paths"`
+
+	Tarpit struct {
+		Seed   string `json:"seed"`
+		Corpus string `json:"corpus"`
+	} `json:"tarpit"`
+
+	tarpitGen     *tarpitGenerator
+	tarpitSeedStr string
 
 	Branding struct {
 		LogoURL string `json:"logo_url"`
@@ -257,10 +270,27 @@ func loadConfig(path string) (*Config, error) {
 	cfg.compiledWhitelist = compileWhitelist(cfg.Whitelist)
 	cfg.compiledTrustedProxies = compileWhitelist(cfg.TrustedProxies)
 
+	cfg.tarpitSeedStr = cfg.Tarpit.Seed
+	if cfg.tarpitSeedStr == "" {
+		cfg.tarpitSeedStr = cfg.CookieSecret
+	}
+	loadTarpitGenerator(cfg)
+
+	// Security invariants: refuse to start with a forgeable cookie secret or
+	// with XFF trust enabled but no explicit proxy allowlist.
+	if len(cfg.CookieSecret) < 32 {
+		return nil, fmt.Errorf("cookie_secret must be set to at least 32 bytes (generate one with: openssl rand -hex 32)")
+	}
 	if cfg.TrustRealIP && len(cfg.TrustedProxies) == 0 {
-		log.Println("NOTE: trust_real_ip is enabled without trusted_proxies — auto-trusting X-Forwarded-For from loopback/private IPs only")
-		log.Println("NOTE: set trusted_proxies explicitly if your reverse proxy connects from a non-private address")
+		return nil, fmt.Errorf("trust_real_ip requires trusted_proxies listing your reverse proxy IPs/CIDRs (e.g. [\"127.0.0.0/8\", \"172.16.0.0/12\", \"10.0.0.0/8\", \"192.168.0.0/16\"] for Docker/nginx-on-host setups)")
+	}
+	if cfg.AbuseIPDB.Enabled && cfg.Anonymize() {
+		log.Println("NOTE: anonymize_ips is enabled — AbuseIPDB reporting is disabled (reports must carry the real IP); blacklist fetching still works")
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) Anonymize() bool {
+	return c.AnonymizeIPs == nil || *c.AnonymizeIPs
 }

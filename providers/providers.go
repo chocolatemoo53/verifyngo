@@ -10,7 +10,7 @@ import (
 )
 
 type Verifier interface {
-	Verify(token string) (bool, error)
+	Verify(token string, remoteIP string) (bool, error)
 	SiteKey() string
 	WidgetScriptURL() string
 }
@@ -31,9 +31,12 @@ func (c *Cap) verifyBase() string {
 	return c.APIURL
 }
 
-func (c *Cap) Verify(token string) (bool, error) {
+func (c *Cap) Verify(token string, remoteIP string) (bool, error) {
 	endpoint := strings.TrimRight(c.verifyBase(), "/") + "/" + c.SiteKeyV + "/siteverify"
 	form := url.Values{"secret": {c.SecretKey}, "response": {token}}
+	if remoteIP != "" {
+		form.Set("remoteip", remoteIP)
+	}
 	resp, err := httpClient.PostForm(endpoint, form)
 	if err != nil {
 		return false, err
@@ -58,8 +61,11 @@ type Turnstile struct {
 	SecretKey string
 }
 
-func (t *Turnstile) Verify(token string) (bool, error) {
+func (t *Turnstile) Verify(token string, remoteIP string) (bool, error) {
 	form := url.Values{"secret": {t.SecretKey}, "response": {token}}
+	if remoteIP != "" {
+		form.Set("remoteip", remoteIP)
+	}
 	resp, err := httpClient.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify", form)
 	if err != nil {
 		return false, err
@@ -84,8 +90,11 @@ type HCaptcha struct {
 	SecretKey string
 }
 
-func (h *HCaptcha) Verify(token string) (bool, error) {
+func (h *HCaptcha) Verify(token string, remoteIP string) (bool, error) {
 	form := url.Values{"secret": {h.SecretKey}, "response": {token}}
+	if remoteIP != "" {
+		form.Set("remoteip", remoteIP)
+	}
 	resp, err := httpClient.PostForm("https://hcaptcha.com/siteverify", form)
 	if err != nil {
 		return false, err

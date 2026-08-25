@@ -39,7 +39,7 @@ type memoryStore struct {
 	walkaways  map[string]counterEntry
 	blocked    map[string]time.Time
 	reported   map[string]time.Time
-	banCounts  map[string]int
+	banCounts  map[string]counterEntry
 	recentPath map[string][]string
 	passiveCnt map[string]counterEntry
 
@@ -61,7 +61,7 @@ func newMemoryStore(path string, saveInterval time.Duration) *memoryStore {
 		walkaways:    make(map[string]counterEntry),
 		blocked:      make(map[string]time.Time),
 		reported:     make(map[string]time.Time),
-		banCounts:    make(map[string]int),
+		banCounts:    make(map[string]counterEntry),
 		recentPath:   make(map[string][]string),
 		passiveCnt:   make(map[string]counterEntry),
 		persistPath:  path,
@@ -78,34 +78,52 @@ func newMemoryStore(path string, saveInterval time.Duration) *memoryStore {
 func (s *memoryStore) sweepLoop() {
 	t := time.NewTicker(5 * time.Minute)
 	for range t.C {
-		now := time.Now()
-		s.mu.Lock()
-		for ip, e := range s.walkaways {
-			if now.After(e.Expires) {
-				delete(s.walkaways, ip)
-				s.dirty = true
-			}
-		}
-		for ip, exp := range s.blocked {
-			if now.After(exp) {
-				delete(s.blocked, ip)
-				s.dirty = true
-			}
-		}
-		for ip, ts := range s.reported {
-			if now.Sub(ts) > time.Hour {
-				delete(s.reported, ip)
-				s.dirty = true
-			}
-		}
-		for ip, e := range s.passiveCnt {
-			if now.After(e.Expires) {
-				delete(s.passiveCnt, ip)
-				s.dirty = true
-			}
-		}
-		s.mu.Unlock()
+		s.sweepOnce()
 	}
+}
+
+func (s *memoryStore) sweepOnce() {
+	now := time.Now()
+	s.mu.Lock()
+	for ip, e := range s.walkaways {
+		if now.After(e.Expires) {
+			delete(s.walkaways, ip)
+			s.dirty = true
+		}
+	}
+	for ip, exp := range s.blocked {
+		if now.After(exp) {
+			delete(s.blocked, ip)
+			s.dirty = true
+		}
+	}
+	for ip, ts := range s.reported {
+		if now.Sub(ts) > time.Hour {
+			delete(s.reported, ip)
+			s.dirty = true
+		}
+	}
+	for ip, e := range s.passiveCnt {
+		if now.After(e.Expires) {
+			delete(s.passiveCnt, ip)
+			s.dirty = true
+		}
+	}
+	for ip, e := range s.banCounts {
+		if now.After(e.Expires) {
+			delete(s.banCounts, ip)
+			s.dirty = true
+		}
+	}
+	for ip := range s.recentPath {
+		_, active := s.walkaways[ip]
+		_, blocked := s.blocked[ip]
+		if !active && !blocked {
+			delete(s.recentPath, ip)
+			s.dirty = true
+		}
+	}
+	s.mu.Unlock()
 }
 
 func (s *memoryStore) IncrWalkaway(ip string, ttl time.Duration) int {
@@ -167,9 +185,12 @@ func (s *memoryStore) ShouldReport(ip string, cooldown time.Duration) bool {
 func (s *memoryStore) IncrBanCount(ip string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.banCounts[ip]++
+	e := s.banCounts[ip]
+	e.Count++
+	e.Expires = time.Now().Add(30 * 24 * time.Hour)
+	s.banCounts[ip] = e
 	s.dirty = true
-	return s.banCounts[ip]
+	return e.Count
 }
 
 func (s *memoryStore) LogPath(ip, path string) {
@@ -241,7 +262,7 @@ func (s *memoryStore) loadSnapshot() {
 		}
 	}
 	for ip, n := range snap.BanCounts {
-		s.banCounts[ip] = n
+		s.banCounts[ip] = counterEntry{Count: n, Expires: time.Now().Add(30 * 24 * time.Hour)}
 	}
 	for ip, paths := range snap.RecentPath {
 		s.recentPath[ip] = paths
@@ -278,8 +299,8 @@ func (s *memoryStore) persistSnapshot() {
 	for ip, ts := range s.reported {
 		snap.Reported[ip] = ts
 	}
-	for ip, n := range s.banCounts {
-		snap.BanCounts[ip] = n
+	for ip, e := range s.banCounts {
+		snap.BanCounts[ip] = e.Count
 	}
 	for ip, paths := range s.recentPath {
 		snap.RecentPath[ip] = paths

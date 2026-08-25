@@ -203,6 +203,17 @@ const challengeTpl = `<!DOCTYPE html>
     cursor: pointer;
   }
   .verifyngo-submit:hover { filter: brightness(1.1); }
+  cap-widget {
+    --cap-background: color-mix(in srgb, var(--cp-bg) 85%, white 6%);
+    --cap-border-color: color-mix(in srgb, var(--cp-text) 25%, transparent);
+    --cap-border-radius: 14px;
+    --cap-color: var(--cp-text);
+    --cap-font: var(--cp-font);
+    --cap-checkbox-border: 1px solid color-mix(in srgb, var(--cp-text) 35%, transparent);
+    --cap-checkbox-background: color-mix(in srgb, var(--cp-bg) 88%, white 5%);
+    --cap-spinner-color: var(--cp-text);
+    --cap-spinner-background-color: color-mix(in srgb, var(--cp-bg) 85%, white 8%);
+  }
   @media (max-width: 380px) {
     main.verifyngo-card { padding: 1.5rem 1.25rem; border-radius: 10px; }
     .verifyngo-title { font-size: 1.2rem; }
@@ -393,13 +404,10 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	}
 
 	nonce := ""
-	if cfg.Cap.UseNonce {
-		n, err := cspNonce()
-		if err != nil {
-			log.Printf("nonce: %v", err)
-		} else {
-			nonce = n
-		}
+	if n, err := cspNonce(); err != nil {
+		log.Printf("nonce: %v", err)
+	} else {
+		nonce = n
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -484,6 +492,11 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 	font = addOrigin(font, cfg.Branding.FontURL)
 	img = addOrigin(img, cfg.Branding.LogoURL)
 
+	frame := []string{"https://challenges.cloudflare.com", "https://hcaptcha.com", "https://newassets.hcaptcha.com"}
+	frame = addOrigin(frame, scriptURL)
+	frame = addOrigin(frame, cfg.Cap.APIURL)
+	worker := []string{"'self'", "blob:", "data:"}
+
 	return strings.Join([]string{
 		"default-src 'none'",
 		"script-src " + strings.Join(script, " "),
@@ -491,6 +504,8 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 		"img-src " + strings.Join(img, " "),
 		"font-src " + strings.Join(font, " "),
 		"connect-src " + strings.Join(connect, " "),
+		"frame-src " + strings.Join(frame, " "),
+		"worker-src " + strings.Join(worker, " "),
 		"base-uri 'self'",
 		"form-action 'self'",
 		"frame-ancestors 'none'",
@@ -498,7 +513,6 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 	}, "; ")
 }
 
-// relativeLuminance returns the WCAG relative luminance of a #rrggbb color.
 func relativeLuminance(hex string) (float64, bool) {
 	hex = strings.TrimPrefix(hex, "#")
 	if len(hex) != 6 {
@@ -520,7 +534,6 @@ func relativeLuminance(hex string) (float64, bool) {
 	return 0.2126*lin(float64(r)) + 0.7152*lin(float64(g)) + 0.0722*lin(float64(b)), true
 }
 
-// accentTextColor picks white or black so text on the accent keeps >= 4.5:1.
 func accentTextColor(accentHex string) string {
 	l, ok := relativeLuminance(accentHex)
 	if !ok {
@@ -554,14 +567,15 @@ func sanitizeReturnPath(path string) string {
 	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
 		return "/"
 	}
-	if strings.ContainsAny(path, "\r\n") {
+	if strings.ContainsAny(path, "\r\n\\") {
 		return "/"
 	}
 	u, err := url.Parse(path)
 	if err != nil || u.IsAbs() || u.Host != "" {
 		return "/"
 	}
-	return path
+	clean := &url.URL{Path: u.Path, RawQuery: u.RawQuery, Fragment: u.Fragment}
+	return clean.String()
 }
 
 func providerForRequest(cfg *Config, r *http.Request) string {

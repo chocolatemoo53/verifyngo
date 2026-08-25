@@ -21,8 +21,6 @@ type sliderChallenge struct {
 	expires time.Time
 }
 
-// sliderChallengeStore holds pending slider answers in memory. Entries are
-// single-use and expire after the configured TTL, so nothing is persisted.
 type sliderChallengeStore struct {
 	mu         sync.Mutex
 	challenges map[string]sliderChallenge
@@ -82,7 +80,6 @@ func (s *sliderChallengeStore) issue(answer int) (string, error) {
 	return id, nil
 }
 
-// consume atomically validates and removes the challenge regardless of outcome.
 func (s *sliderChallengeStore) consume(id string, value, tolerance int) bool {
 	if id == "" {
 		return false
@@ -115,9 +112,6 @@ type sliderChallengeData struct {
 	Height       int
 }
 
-// buildSliderChallenge renders a fresh puzzle: a procedural scene, a target
-// slot cut into a copy of it, and a matching piece. The range-input value maps
-// 1:1 to the piece's left edge in pixels, so 'answer' doubles as the value.
 func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	w := cfg.Slider.Width
 	h := cfg.Slider.Height
@@ -145,9 +139,6 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	}
 	answer := 0
 	if max > 0 {
-		// Never let the answer land within tolerance of the start position, or
-		// a bot could just refresh and click Verify until the piece happens to
-		// be pre-aligned (answer in [0, tolerance]).
 		if max > cfg.Slider.Tolerance {
 			answer = cfg.Slider.Tolerance + 1 + rng.Intn(max-cfg.Slider.Tolerance)
 		} else {
@@ -296,8 +287,6 @@ func drawTrack(img *image.RGBA, x0, y0, length int, c color.RGBA) {
 	}
 }
 
-// drawSlot cuts a target region into the background: a dark translucent band
-// with a dashed border and a matching semicircular notch where the piece tab fits.
 func drawSlot(img *image.RGBA, x0, pieceW, tabR, h int) {
 	w := img.Bounds().Dx()
 	overlay := color.RGBA{0, 0, 0, 130}
@@ -329,7 +318,6 @@ func drawSlot(img *image.RGBA, x0, pieceW, tabR, h int) {
 	}
 	_ = gap
 
-	// semicircular notch on the right edge of the slot, matching the piece tab
 	notch := color.RGBA{0, 0, 0, 255}
 	tabCX := x0 + pieceW
 	for y := -tabR; y <= tabR; y++ {
@@ -341,8 +329,6 @@ func drawSlot(img *image.RGBA, x0, pieceW, tabR, h int) {
 	}
 }
 
-// drawPiece extracts the scene content behind the slot and adds a semicircular
-// tab on its right edge, so the piece reads as the missing piece of the puzzle.
 func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int) *image.RGBA {
 	w := scene.Bounds().Dx()
 	pieceTotal := pieceW + tabR
@@ -361,7 +347,6 @@ func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int) *image.RGBA {
 		for dx := 0; dx < pieceW; dx++ {
 			extract(dx, dy)
 		}
-		// tab bulges right from the piece's right edge at mid-height
 		for dx := pieceW; dx < pieceTotal; dx++ {
 			rx := dx - pieceW
 			ry := dy - h/2

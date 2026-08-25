@@ -426,7 +426,7 @@ func (n policyNetworkEntry) FetchPrefixes(c *http.Client) (output []net.IPNet, e
 		return nil, errors.New("no url, file, asn, cidr or prefixes specified")
 	}
 
-	data, err := io.ReadAll(reader)
+	data, err := io.ReadAll(io.LimitReader(reader, 64<<20))
 	if err != nil {
 		return nil, err
 	}

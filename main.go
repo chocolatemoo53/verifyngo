@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -62,25 +63,72 @@ func clientIP(r *http.Request, cfg *Config) net.IP {
 		return connectingIP
 	}
 
-	trust := cfg.compiledTrustedProxies.contains(connectingIP)
-	if !trust && len(cfg.TrustedProxies) == 0 && connectingIP != nil {
-		trust = connectingIP.IsLoopback() || connectingIP.IsPrivate()
-	}
-
-	if !trust {
+	if !cfg.compiledTrustedProxies.contains(connectingIP) {
 		return connectingIP
 	}
 
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		for _, ip := range strings.Split(xff, ",") {
-			trimmed := strings.TrimSpace(ip)
-			parsed := net.ParseIP(trimmed)
-			if parsed != nil {
-				return parsed
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			parsed := net.ParseIP(strings.TrimSpace(parts[i]))
+			if parsed == nil {
+				continue
 			}
+			if i > 0 && cfg.compiledTrustedProxies.contains(parsed) {
+				continue
+			}
+			return parsed
 		}
 	}
 	return connectingIP
+}
+
+func stripQuery(uri string) string {
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		return uri[:i]
+	}
+	return uri
+}
+
+func sanitizeForLog(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func anonymizeIP(ip net.IP) net.IP {
+	if ip == nil {
+		return nil
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.Mask(net.CIDRMask(24, 32))
+	}
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return nil
+	}
+	return ip16.Mask(net.CIDRMask(48, 128))
+}
+
+func logIP(cfg *Config, ip net.IP) string {
+	if ip == nil {
+		return "<nil>"
+	}
+	if cfg.Anonymize() {
+		return anonymizeIP(ip).String()
+	}
+	return ip.String()
+}
+
+func logIPString(cfg *Config, s string) string {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return sanitizeForLog(s)
+	}
+	return logIP(cfg, ip)
 }
 
 func compileRegexList(patterns []string) ([]*regexp.Regexp, error) {
@@ -189,10 +237,7 @@ func main() {
 	mux.HandleFunc("/__set_provider", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		p := q.Get("provider")
-		returnTo := q.Get("return_to")
-		if returnTo == "" {
-			returnTo = "/"
-		}
+		returnTo := sanitizeReturnPath(q.Get("return_to"))
 		valid := false
 		for _, a := range availableProviders(cfg) {
 			if a == p {
@@ -225,7 +270,14 @@ func main() {
 	})
 
 	log.Printf("listening on %s, proxying to %s (provider=%s)", cfg.ListenAddr, cfg.UpstreamURL, cfg.Provider)
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) {
@@ -263,7 +315,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 
 	if blacklist != nil {
 		if trie, ok := blacklist.Load().(*ipTrie); ok && trie != nil && trie.Contains(ip) {
-			log.Printf("denied %s: on AbuseIPDB blacklist", ipStr)
+			log.Printf("denied %s: on AbuseIPDB blacklist", logIP(cfg, ip))
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -277,6 +329,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	case "deny":
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	case "tarpit":
+		serveTarpit(w, r, cfg)
+		return
 	}
 
 	if cfg.Progressive.Enabled {
@@ -284,7 +339,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 			if pc, err := r.Cookie(cfg.CookieName + "_passive"); err == nil && pc.Value != "" {
 				passiveCount := store.IncrPassiveCount(pc.Value, cfg.Progressive.RequestWindow.Duration)
 				if passiveCount > cfg.Progressive.MaxRequests {
-					log.Printf("passive rate limit hit cookie=%s... count=%d max=%d", pc.Value[:8], passiveCount, cfg.Progressive.MaxRequests)
+					cookiePrefix := pc.Value
+					if len(cookiePrefix) > 8 {
+						cookiePrefix = cookiePrefix[:8]
+					}
+					log.Printf("passive rate limit hit cookie=%s... count=%d max=%d", sanitizeForLog(cookiePrefix), passiveCount, cfg.Progressive.MaxRequests)
 				} else {
 					proxy.ServeHTTP(w, r)
 					return
@@ -299,19 +358,19 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 
 	requestURI := r.URL.RequestURI()
 	count := store.IncrWalkaway(ipStr, cfg.Walkaway.TTL.Duration)
-	store.LogPath(ipStr, requestURI)
+	store.LogPath(ipStr, stripQuery(requestURI))
 	if count >= cfg.Walkaway.Threshold {
 		store.Block(ipStr, cfg.Ban.Duration.Duration)
 		banCount := store.IncrBanCount(ipStr)
 		paths := store.RecentPaths(ipStr)
-		log.Printf("banned %s after %d walk-aways (ban #%d); recent paths: %v", ipStr, count, banCount, paths)
+		log.Printf("banned %s after %d walk-aways (ban #%d); recent paths: %v", logIP(cfg, ip), count, banCount, sanitizeForLog(fmt.Sprint(paths)))
 		if banCount >= cfg.AbuseIPDB.ReportAfterBans && store.ShouldReport(ipStr, 15*time.Minute) {
 			reportIP(cfg, ipStr, count, banCount, paths)
 		}
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	serveChallenge(w, r, cfg, cfg.Cap.APIURL, ipStr, requestURI, count == 1)
+	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), stripQuery(requestURI), count == 1)
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store) {
@@ -319,43 +378,47 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	token := r.FormValue("token")
-	ip := clientIP(r, cfg).String()
+	ip := clientIP(r, cfg)
+	ipStr := ip.String()
 	returnTo := sanitizeReturnPath(r.FormValue("return_to"))
 
 	provider := providerForRequest(cfg, r)
 
-	log.Printf("verify start ip=%s provider=%s return_to=%s token_len=%d", ip, provider, returnTo, len(token))
+	log.Printf("verify start ip=%s provider=%s return_to=%s token_len=%d", logIP(cfg, ip), provider, sanitizeForLog(returnTo), len(token))
 
 	if provider == "slider" {
-		handleSliderVerify(w, r, cfg, store, ip, returnTo)
+		handleSliderVerify(w, r, cfg, store, ipStr, returnTo)
 		return
 	}
 
 	verifier := buildVerifierForProvider(cfg, provider)
 
-	ok, err := verifier.Verify(token)
+	ok, err := verifier.Verify(token, ipStr)
 	if err != nil {
-		log.Printf("verify error ip=%s provider=%s err=%v", ip, provider, err)
+		log.Printf("verify error ip=%s provider=%s err=%v", logIP(cfg, ip), provider, err)
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
 	if !ok {
-		log.Printf("verify failed ip=%s provider=%s", ip, provider)
+		log.Printf("verify failed ip=%s provider=%s", logIP(cfg, ip), provider)
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
 
-	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s secure=%v)", ip, provider, cfg.CookieName, isSecureRequest(r, cfg))
+	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s secure=%v)", logIP(cfg, ip), provider, cfg.CookieName, isSecureRequest(r, cfg))
 
-	store.ResetWalkaway(ip)
+	store.ResetWalkaway(ipStr)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
-	log.Printf("redirecting ip=%s to %s", ip, returnTo)
+	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
@@ -364,22 +427,22 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 	answerStr := r.FormValue("answer")
 	answer, err := strconv.Atoi(answerStr)
 	if err != nil || answer < 0 || answer > 1500 {
-		log.Printf("slider verify failed ip=%s id=%v answer=%q", ip, captchaID, answerStr)
+		log.Printf("slider verify failed ip=%s id=%v answer=%q", logIPString(cfg, ip), captchaID, sanitizeForLog(answerStr))
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
 
 	ok := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance)
 	if !ok {
-		log.Printf("slider verify failed ip=%s id=%v answer=%d", ip, captchaID, answer)
+		log.Printf("slider verify failed ip=%s id=%v answer=%d", logIPString(cfg, ip), captchaID, answer)
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
 
-	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", ip, cfg.CookieName, isSecureRequest(r, cfg))
+	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", logIPString(cfg, ip), cfg.CookieName, isSecureRequest(r, cfg))
 	store.ResetWalkaway(ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
-	log.Printf("redirecting ip=%s to %s", ip, returnTo)
+	log.Printf("redirecting ip=%s to %s", logIPString(cfg, ip), sanitizeForLog(returnTo))
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }

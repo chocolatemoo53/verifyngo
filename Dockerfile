@@ -8,8 +8,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/verifyn
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build --chown=nonroot:nonroot /out/verifyngo /app/verifyngo
-COPY --chown=nonroot:nonroot /examples/config.json /config.json
-
 EXPOSE 8080
 USER nonroot:nonroot
 

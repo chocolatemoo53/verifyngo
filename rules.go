@@ -90,6 +90,8 @@ func normalizeAction(action string) string {
 		return "allow"
 	case "deny", "drop":
 		return "deny"
+	case "tarpit", "poison":
+		return "tarpit"
 	case "challenge", "check", "none":
 		return "challenge"
 	default:
@@ -100,6 +102,7 @@ func normalizeAction(action string) string {
 var validActions = map[string]bool{
 	"allow": true, "pass": true,
 	"deny": true, "drop": true,
+	"tarpit": true, "poison": true,
 	"challenge": true, "check": true, "none": true,
 }
 

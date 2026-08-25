@@ -1,9 +1,10 @@
 {
   "listen_addr": "127.0.0.1:8080",
   "upstream_url": "http://127.0.0.1:8886",
-  "cookie_secret": "CHANGE_ME_openssl_rand_hex_32",
+  "cookie_secret": "REPLACE_ME_openssl_rand_hex_32_chars_min",
   "cookie_name": "cp_verified",
   "cookie_ttl": "168h",
+  "anonymize_ips": true,
   "provider": "cap",
   "response_csp": "",
   "cap": {
@@ -32,7 +33,7 @@
     "height": 120
   },
   "trust_real_ip": false,
-  "trusted_proxies": [],
+  "trusted_proxies": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
   "static_dir": "/static",
   "rules_file": "/rules.txt",
   "policy_file": "",
@@ -116,6 +117,10 @@
   "walkaway": {
     "threshold": 10,
     "ttl": "2h"
+  },
+  "tarpit": {
+    "seed": "",
+    "corpus": ""
   },
   "ban": {
     "duration": "24h"

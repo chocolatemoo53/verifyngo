@@ -13,6 +13,9 @@ import (
 )
 
 func reportIP(cfg *Config, ip string, walkaways, banCount int, paths []string) {
+	if cfg.Anonymize() {
+		return
+	}
 	if !cfg.AbuseIPDB.Enabled || cfg.AbuseIPDB.APIKey == "" {
 		return
 	}
@@ -29,14 +32,14 @@ func reportIP(cfg *Config, ip string, walkaways, banCount int, paths []string) {
 		form := url.Values{
 			"ip":         {ip},
 			"categories": {cfg.AbuseIPDB.Categories},
-			"comment":    {comment},
+			"comment":    {sanitizeForLog(comment)},
 		}
-		req, err := http.NewRequest("POST", "https://api.abuseipdb.com/api/v2/report", nil)
+		req, err := http.NewRequest("POST", "https://api.abuseipdb.com/api/v2/report", strings.NewReader(form.Encode()))
 		if err != nil {
 			log.Printf("abuseipdb: build request: %v", err)
 			return
 		}
-		req.URL.RawQuery = form.Encode()
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Key", cfg.AbuseIPDB.APIKey)
 		req.Header.Set("Accept", "application/json")
 		resp, err := client.Do(req)
