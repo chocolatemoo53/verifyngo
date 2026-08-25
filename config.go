@@ -70,6 +70,7 @@ type Config struct {
 		MaxChallenges int      `json:"max_challenges"`
 		Width         int      `json:"width"`
 		Height        int      `json:"height"`
+		MinSolveTime  Duration `json:"min_solve_time"`
 	} `json:"slider"`
 
 	Whitelist     []string `json:"whitelist"`
@@ -248,6 +249,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Slider.Height < 60 {
 		cfg.Slider.Height = 60
+	}
+	if cfg.Slider.MinSolveTime.Duration == 0 {
+		cfg.Slider.MinSolveTime = Duration{700 * time.Millisecond}
 	}
 	if cfg.Branding.AccentColor == "" {
 		cfg.Branding.AccentColor = "#4A90D9"

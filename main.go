@@ -432,9 +432,29 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 		return
 	}
 
-	ok := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance)
-	if !ok {
+	if !cfg.sliderChallenges.allowAttempt(ip, sliderVerifyWindow, sliderVerifyMaxPerMin) {
+		log.Printf("slider verify throttled ip=%s", logIPString(cfg, ip))
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+
+	res := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance, cfg.Slider.MinSolveTime.Duration)
+	lowVariance := cfg.sliderChallenges.recordAnswer(ip, answer, sliderAnswerSamples, cfg.Slider.Tolerance, sliderAnswerWindow)
+
+	if res.tooFast {
+		store.IncrWalkaway(ip, cfg.Walkaway.TTL.Duration)
+		log.Printf("slider verify too fast ip=%s", logIPString(cfg, ip))
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+	if !res.ok {
 		log.Printf("slider verify failed ip=%s id=%v answer=%d", logIPString(cfg, ip), captchaID, answer)
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+	if lowVariance {
+		store.IncrWalkaway(ip, cfg.Walkaway.TTL.Duration)
+		log.Printf("slider verify suspicious (repeated answers) ip=%s", logIPString(cfg, ip))
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}

@@ -1,12 +1,12 @@
 module verifyngo
 
-go 1.22
+go 1.26.6
 
 require (
 	github.com/Knetic/govaluate v3.0.0+incompatible
 	github.com/itchyny/gojq v0.12.17
 	github.com/oschwald/geoip2-golang v1.13.0
-	github.com/redis/go-redis/v9 v9.6.1
+	github.com/redis/go-redis/v9 v9.6.3
 	gopkg.in/yaml.v3 v3.0.1
 )
 

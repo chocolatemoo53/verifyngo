@@ -283,7 +283,7 @@ const challengeTpl = `<!DOCTYPE html>
     .verifyngo-range::-webkit-slider-thumb {
       -webkit-appearance: none;
       height: 100%;
-      width: {{.SliderPieceW}}px;
+      width: {{.SliderPiecePct}}%;
       background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
     }
     .verifyngo-range::-moz-range-track {
@@ -292,7 +292,7 @@ const challengeTpl = `<!DOCTYPE html>
     }
     .verifyngo-range::-moz-range-thumb {
       height: 100%;
-      width: {{.SliderPieceW}}px;
+      width: {{.SliderPiecePct}}%;
       border: none;
       border-radius: 0;
       background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
@@ -381,7 +381,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	sliderID := ""
 	sliderBg := ""
 	sliderPiece := ""
-	sliderPieceW := 0
+	sliderPiecePct := ""
 	sliderMax := 0
 	sliderWidth := cfg.Slider.Width
 	if provider == "slider" {
@@ -396,7 +396,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 				sliderID = challengeID
 				sliderBg = data.BgDataURI
 				sliderPiece = data.PieceDataURI
-				sliderPieceW = data.PieceWidth
+				sliderPiecePct = data.PiecePct
 				sliderMax = data.Max
 				sliderWidth = data.Width
 			}
@@ -445,7 +445,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		"SliderChallengeID": sliderID,
 		"SliderBg":          template.URL(sliderBg),
 		"SliderPiece":       template.URL(sliderPiece),
-		"SliderPieceW":      sliderPieceW,
+		"SliderPiecePct":    sliderPiecePct,
 		"SliderMax":         sliderMax,
 		"SliderWidth":       sliderWidth,
 	})

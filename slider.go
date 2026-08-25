@@ -16,14 +16,79 @@ import (
 	"time"
 )
 
+const (
+	sliderVerifyWindow    = time.Minute
+	sliderVerifyMaxPerMin = 12
+	sliderAnswerWindow    = 15 * time.Minute
+	sliderAnswerSamples   = 4
+)
+
+type tabShape int
+
+const (
+	shapeSemicircle tabShape = iota
+	shapeTriangle
+	shapeSquare
+	shapeDoubleBump
+	shapeCount
+)
+
+func inTab(shape tabShape, dx, dy, r int) bool {
+	if dx < 0 {
+		return false
+	}
+	switch shape {
+	case shapeSemicircle:
+		return dx*dx+dy*dy <= r*r
+	case shapeTriangle:
+		ady := dy
+		if ady < 0 {
+			ady = -ady
+		}
+		return ady+dx <= r
+	case shapeSquare:
+		ady := dy
+		if ady < 0 {
+			ady = -ady
+		}
+		return dx <= r && ady <= r
+	case shapeDoubleBump:
+		rr := r / 2
+		if rr < 1 {
+			rr = 1
+		}
+		for _, cy := range []int{-rr, rr} {
+			ddy := dy - cy
+			if dx*dx+ddy*ddy <= rr*rr {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
 type sliderChallenge struct {
 	answer  int
 	expires time.Time
+	issued  time.Time
+}
+
+type answerSample struct {
+	value int
+	at    time.Time
+}
+
+type sliderConsumeResult struct {
+	ok      bool
+	tooFast bool
 }
 
 type sliderChallengeStore struct {
 	mu         sync.Mutex
 	challenges map[string]sliderChallenge
+	attempts   map[string]counterEntry
+	answers    map[string][]answerSample
 	ttl        time.Duration
 	max        int
 }
@@ -37,6 +102,8 @@ func newSliderChallengeStore(ttl time.Duration, max int) *sliderChallengeStore {
 	}
 	s := &sliderChallengeStore{
 		challenges: make(map[string]sliderChallenge),
+		attempts:   make(map[string]counterEntry),
+		answers:    make(map[string][]answerSample),
 		ttl:        ttl,
 		max:        max,
 	}
@@ -47,15 +114,37 @@ func newSliderChallengeStore(ttl time.Duration, max int) *sliderChallengeStore {
 func (s *sliderChallengeStore) sweepLoop() {
 	t := time.NewTicker(time.Minute)
 	for range t.C {
-		now := time.Now()
-		s.mu.Lock()
-		for k, v := range s.challenges {
-			if now.After(v.expires) {
-				delete(s.challenges, k)
+		s.sweepOnce()
+	}
+}
+
+func (s *sliderChallengeStore) sweepOnce() {
+	now := time.Now()
+	s.mu.Lock()
+	for k, v := range s.challenges {
+		if now.After(v.expires) {
+			delete(s.challenges, k)
+		}
+	}
+	for ip, e := range s.attempts {
+		if now.After(e.Expires) {
+			delete(s.attempts, ip)
+		}
+	}
+	for ip, samples := range s.answers {
+		kept := samples[:0]
+		for _, sample := range samples {
+			if now.Sub(sample.at) < sliderAnswerWindow {
+				kept = append(kept, sample)
 			}
 		}
-		s.mu.Unlock()
+		if len(kept) == 0 {
+			delete(s.answers, ip)
+		} else {
+			s.answers[ip] = kept
+		}
 	}
+	s.mu.Unlock()
 }
 
 func (s *sliderChallengeStore) issue(answer int) (string, error) {
@@ -76,29 +165,79 @@ func (s *sliderChallengeStore) issue(answer int) (string, error) {
 	if len(s.challenges) >= s.max {
 		return "", errors.New("slider: too many pending challenges")
 	}
-	s.challenges[id] = sliderChallenge{answer: answer, expires: now.Add(s.ttl)}
+	s.challenges[id] = sliderChallenge{answer: answer, expires: now.Add(s.ttl), issued: now}
 	return id, nil
 }
 
-func (s *sliderChallengeStore) consume(id string, value, tolerance int) bool {
+func (s *sliderChallengeStore) consume(id string, value, tolerance int, minSolve time.Duration) sliderConsumeResult {
 	if id == "" {
-		return false
+		return sliderConsumeResult{}
 	}
 	s.mu.Lock()
 	c, ok := s.challenges[id]
 	delete(s.challenges, id)
 	s.mu.Unlock()
 	if !ok {
-		return false
+		return sliderConsumeResult{}
 	}
-	if time.Now().After(c.expires) {
-		return false
+	now := time.Now()
+	if now.After(c.expires) {
+		return sliderConsumeResult{}
 	}
 	diff := value - c.answer
 	if diff < 0 {
 		diff = -diff
 	}
-	return diff <= tolerance
+	res := sliderConsumeResult{ok: diff <= tolerance}
+	if minSolve > 0 && now.Sub(c.issued) < minSolve {
+		res.ok = false
+		res.tooFast = true
+	}
+	return res
+}
+
+func (s *sliderChallengeStore) allowAttempt(ip string, window time.Duration, limit int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	e, ok := s.attempts[ip]
+	if !ok || now.After(e.Expires) {
+		e = counterEntry{Count: 0, Expires: now.Add(window)}
+	}
+	e.Count++
+	s.attempts[ip] = e
+	return e.Count <= limit
+}
+
+func (s *sliderChallengeStore) recordAnswer(ip string, value, n, tolerance int, window time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	samples := append(s.answers[ip], answerSample{value: value, at: now})
+	kept := samples[:0]
+	for _, sample := range samples {
+		if now.Sub(sample.at) < window {
+			kept = append(kept, sample)
+		}
+	}
+	if len(kept) > 4*n {
+		kept = kept[len(kept)-4*n:]
+	}
+	s.answers[ip] = kept
+	if len(kept) < n {
+		return false
+	}
+	last := kept[len(kept)-n:]
+	lo, hi := last[0].value, last[0].value
+	for _, sample := range last[1:] {
+		if sample.value < lo {
+			lo = sample.value
+		}
+		if sample.value > hi {
+			hi = sample.value
+		}
+	}
+	return hi-lo <= tolerance
 }
 
 type sliderChallengeData struct {
@@ -106,6 +245,7 @@ type sliderChallengeData struct {
 	BgDataURI    string
 	PieceDataURI string
 	PieceWidth   int
+	PiecePct     string
 	Max          int
 	Answer       int
 	Width        int
@@ -115,6 +255,16 @@ type sliderChallengeData struct {
 func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	w := cfg.Slider.Width
 	h := cfg.Slider.Height
+
+	var seed [8]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return nil, err
+	}
+	rng := mrand.New(mrand.NewSource(int64(binary.BigEndian.Uint64(seed[:]))))
+
+	w += rng.Intn(81)
+	h += rng.Intn(41)
+
 	pieceW := w / 5
 	if pieceW < 40 {
 		pieceW = 40
@@ -124,32 +274,45 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	}
 	tabR := pieceW / 2
 	pieceTotal := pieceW + tabR
+	shape := tabShape(rng.Intn(int(shapeCount)))
 
-	var seed [8]byte
-	if _, err := rand.Read(seed[:]); err != nil {
-		return nil, err
-	}
-	rng := mrand.New(mrand.NewSource(int64(binary.BigEndian.Uint64(seed[:]))))
-
-	scene := drawScene(w, h, rng)
-
+	// Pre-aligned answer: answer ∈ [tol+1, max] so refresh-then-verify
+	// doesn't land on the pre-set thumb position.
 	max := w - pieceTotal
 	if max < pieceTotal {
 		max = pieceTotal
 	}
+	tol := cfg.Slider.Tolerance
 	answer := 0
 	if max > 0 {
-		if max > cfg.Slider.Tolerance {
-			answer = cfg.Slider.Tolerance + 1 + rng.Intn(max-cfg.Slider.Tolerance)
+		if max > tol {
+			answer = tol + 1 + rng.Intn(max-tol)
 		} else {
 			answer = max
 		}
 	}
 
+	scene := drawScene(w, h, rng)
 	bg := cloneRGBA(scene)
-	drawSlot(bg, answer, pieceW, tabR, h)
 
-	piece := drawPiece(scene, answer, pieceW, tabR, h)
+	// Place 1-2 decoy bands with a different notch shape to defeat
+	// generic "find the dark region" solvers.  The real slot is drawn
+	// last so it overlays any accidental overlap.
+	sep := pieceTotal + 12
+	placed := []int{answer}
+	nDecoys := 1 + rng.Intn(2)
+	for i := 0; i < nDecoys; i++ {
+		dx := placeDecoy(w, pieceTotal, placed, sep, rng)
+		if dx < 0 {
+			continue
+		}
+		placed = append(placed, dx)
+		ds := tabShape(rng.Intn(int(shapeCount)))
+		drawTargetBand(bg, dx, pieceW, tabR, h, ds, rng)
+	}
+
+	drawTargetBand(bg, answer, pieceW, tabR, h, shape, rng)
+	piece := drawPiece(scene, answer, pieceW, tabR, h, shape)
 
 	bgURI, err := pngDataURI(bg)
 	if err != nil {
@@ -160,15 +323,158 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 		return nil, err
 	}
 
+	piecePct := 0.0
+	if w > 0 {
+		piecePct = 100.0 * float64(pieceTotal) / float64(w)
+	}
+
 	return &sliderChallengeData{
 		BgDataURI:    bgURI,
 		PieceDataURI: pieceURI,
 		PieceWidth:   pieceTotal,
+		PiecePct:     fmtFloat(piecePct),
 		Max:          max,
 		Answer:       answer,
 		Width:        w,
 		Height:       h,
 	}, nil
+}
+
+func placeDecoy(w, pieceTotal int, placed []int, sep int, rng *mrand.Rand) int {
+	maxStart := w - pieceTotal - 2
+	if maxStart < 3 {
+		return -1
+	}
+	for i := 0; i < 20; i++ {
+		x := 2 + rng.Intn(maxStart-2+1)
+		ok := true
+		for _, p := range placed {
+			if x-p < sep && p-x < sep {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return x
+		}
+	}
+	return -1
+}
+
+func fmtFloat(f float64) string {
+	s := ""
+	i := int(f)
+	if i >= 100 {
+		s += string('0' + byte(i%1000/100))
+	}
+	if i >= 10 {
+		s += string('0' + byte(i%100/10))
+	}
+	s += string('0' + byte(i%10))
+	s += "."
+	frac := f - float64(i)
+	for j := 0; j < 2; j++ {
+		frac *= 10
+		d := int(frac)
+		s += string('0' + byte(d%10))
+		frac -= float64(d)
+	}
+	return s
+}
+
+func drawTargetBand(img *image.RGBA, x0, pieceW, tabR, h int, shape tabShape, rng *mrand.Rand) {
+	w := img.Bounds().Dx()
+	for y := 0; y < h; y++ {
+		for x := x0; x < x0+pieceW && x < w; x++ {
+			if x < 0 {
+				continue
+			}
+			a := uint8(105 + rng.Intn(55))
+			setPx(img, x, y, color.RGBA{0, 0, 0, a})
+		}
+	}
+
+	dash := color.RGBA{255, 255, 255, 190}
+	dashLen := 6
+	for y := 0; y < h; y++ {
+		if (y/dashLen)%2 == 0 {
+			setPx(img, x0, y, dash)
+			if x0+pieceW < w {
+				setPx(img, x0+pieceW-1, y, dash)
+			}
+		}
+	}
+	for x := x0; x < x0+pieceW; x++ {
+		if (x/dashLen)%2 == 0 {
+			setPx(img, x, 0, dash)
+			if h > 1 {
+				setPx(img, x, h-1, dash)
+			}
+		}
+	}
+
+	notch := color.RGBA{0, 0, 0, 255}
+	tabCX := x0 + pieceW
+	for dy := -tabR - 1; dy <= tabR+1; dy++ {
+		for dx := 0; dx <= tabR+1; dx++ {
+			if inTab(shape, dx, dy, tabR) {
+				setPx(img, tabCX+dx, h/2+dy, notch)
+			}
+		}
+	}
+}
+
+func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int, shape tabShape) *image.RGBA {
+	w := scene.Bounds().Dx()
+	pieceTotal := pieceW + tabR
+	p := image.NewRGBA(image.Rect(0, 0, pieceTotal, h))
+
+	extract := func(px, py int) bool {
+		sx, sy := x0+px, py
+		if sx < 0 || sx >= w || sy < 0 || sy >= h {
+			return false
+		}
+		p.SetRGBA(px, py, scene.At(sx, sy).(color.RGBA))
+		return true
+	}
+
+	for dy := 0; dy < h; dy++ {
+		for dx := 0; dx < pieceW; dx++ {
+			extract(dx, dy)
+		}
+		for dx := 0; dx <= tabR; dx++ {
+			for dy := -tabR - 1; dy <= tabR+1; dy++ {
+				if inTab(shape, dx, dy, tabR) {
+					extract(pieceW+dx, h/2+dy)
+				}
+			}
+		}
+	}
+
+	border := color.RGBA{0, 0, 0, 200}
+	for dy := 0; dy < h; dy++ {
+		setPx(p, 0, dy, border)
+		setPx(p, pieceW-1, dy, border)
+	}
+	if h > 1 {
+		for dx := 0; dx < pieceW; dx++ {
+			setPx(p, dx, 0, border)
+			setPx(p, dx, h-1, border)
+		}
+	}
+
+	for dx := 0; dx <= tabR+1; dx++ {
+		for dy := -tabR - 1; dy <= tabR+1; dy++ {
+			if !inTab(shape, dx, dy, tabR) {
+				continue
+			}
+			if !inTab(shape, dx+1, dy, tabR) || !inTab(shape, dx, dy-1, tabR) || !inTab(shape, dx, dy+1, tabR) {
+				setPx(p, pieceW+dx, h/2+dy, border)
+			}
+		}
+	}
+
+	return p
 }
 
 func pngDataURI(img image.Image) (string, error) {
@@ -285,89 +591,4 @@ func drawTrack(img *image.RGBA, x0, y0, length int, c color.RGBA) {
 	for i := 0; i < length; i++ {
 		setPx(img, x0+dir*i, y0+dir*i, c)
 	}
-}
-
-func drawSlot(img *image.RGBA, x0, pieceW, tabR, h int) {
-	w := img.Bounds().Dx()
-	overlay := color.RGBA{0, 0, 0, 130}
-	for y := 0; y < h; y++ {
-		for x := x0; x < x0+pieceW && x < w; x++ {
-			if x >= 0 {
-				img.SetRGBA(x, y, blend(img.At(x, y).(color.RGBA), overlay))
-			}
-		}
-	}
-
-	dash := color.RGBA{255, 255, 255, 190}
-	dashLen, gap := 6, 6
-	for y := 0; y < h; y++ {
-		if (y/dashLen)%2 == 0 {
-			setPx(img, x0, y, dash)
-			if x0+pieceW < w {
-				setPx(img, x0+pieceW-1, y, dash)
-			}
-		}
-	}
-	for x := x0; x < x0+pieceW; x++ {
-		if (x/dashLen)%2 == 0 {
-			setPx(img, x, 0, dash)
-			if h > 1 {
-				setPx(img, x, h-1, dash)
-			}
-		}
-	}
-	_ = gap
-
-	notch := color.RGBA{0, 0, 0, 255}
-	tabCX := x0 + pieceW
-	for y := -tabR; y <= tabR; y++ {
-		for x := 0; x <= tabR; x++ {
-			if x*x+y*y <= tabR*tabR {
-				setPx(img, tabCX+x, h/2+y, notch)
-			}
-		}
-	}
-}
-
-func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int) *image.RGBA {
-	w := scene.Bounds().Dx()
-	pieceTotal := pieceW + tabR
-	p := image.NewRGBA(image.Rect(0, 0, pieceTotal, h))
-
-	extract := func(dx, dy int) bool {
-		sx, sy := x0+dx, dy
-		if sx < 0 || sx >= w || sy < 0 || sy >= h {
-			return false
-		}
-		p.SetRGBA(dx, dy, scene.At(sx, sy).(color.RGBA))
-		return true
-	}
-
-	for dy := 0; dy < h; dy++ {
-		for dx := 0; dx < pieceW; dx++ {
-			extract(dx, dy)
-		}
-		for dx := pieceW; dx < pieceTotal; dx++ {
-			rx := dx - pieceW
-			ry := dy - h/2
-			if rx*rx+ry*ry <= tabR*tabR {
-				extract(dx, dy)
-			}
-		}
-	}
-
-	border := color.RGBA{0, 0, 0, 200}
-	for dy := 0; dy < h; dy++ {
-		setPx(p, 0, dy, border)
-		setPx(p, pieceW-1, dy, border)
-	}
-	if h > 1 {
-		for dx := 0; dx < pieceW; dx++ {
-			setPx(p, dx, 0, border)
-			setPx(p, dx, h-1, border)
-		}
-	}
-	ringCircle(p, pieceW, h/2, tabR, 2, border)
-
-	return p
 }
