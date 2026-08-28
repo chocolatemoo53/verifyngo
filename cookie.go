@@ -19,7 +19,10 @@ func isSecureRequest(r *http.Request, cfg *Config) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if cfg.TrustRealIP && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Scheme"), "https") {
 		return true
 	}
 	return false

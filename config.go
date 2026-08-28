@@ -39,8 +39,6 @@ type Config struct {
 	CookieName   string   `json:"cookie_name"`
 	CookieTTL    Duration `json:"cookie_ttl"`
 
-	// AnonymizeIPs truncates IPs in logs to /24 (IPv4) and /48 (IPv6) and
-	// disables AbuseIPDB reporting. Defaults to true when omitted.
 	AnonymizeIPs *bool `json:"anonymize_ips"`
 
 	ResponseCSP string `json:"response_csp"`
@@ -280,8 +278,6 @@ func loadConfig(path string) (*Config, error) {
 	}
 	loadTarpitGenerator(cfg)
 
-	// Security invariants: refuse to start with a forgeable cookie secret or
-	// with XFF trust enabled but no explicit proxy allowlist.
 	if len(cfg.CookieSecret) < 32 {
 		return nil, fmt.Errorf("cookie_secret must be set to at least 32 bytes (generate one with: openssl rand -hex 32)")
 	}

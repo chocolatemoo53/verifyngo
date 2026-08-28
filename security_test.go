@@ -25,6 +25,9 @@ func TestSanitizeReturnPath(t *testing.T) {
 		{"crlf", "/foo\r\nBar: x", "/"},
 		{"absolute", "https://evil.example", "/"},
 		{"scheme-relative-path", "http:/\\evil.example", "/"},
+		{"protocol-relative-backslash", "/\\evil.example", "/"},
+		{"double-backslash-slash", "/\\\\evil.example", "/"},
+		{"mixed-scheme-relative", "/\\//evil.example", "/"},
 	}
 	for _, c := range cases {
 		if got := sanitizeReturnPath(c.in); got != c.want {
@@ -71,23 +74,18 @@ func TestClientIPRightToLeft(t *testing.T) {
 		return req
 	}
 
-	// Spoofed leftmost entry is ignored; the rightmost untrusted IP wins.
 	if got, _ := clientIP(newReq("10.0.0.1:1000", "1.2.3.4, 203.0.113.9"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
 		t.Errorf("spoofed chain: got %s, want 203.0.113.9", got)
 	}
-	// Single entry from a trusted proxy is the client.
 	if got, _ := clientIP(newReq("10.0.0.1:1000", "203.0.113.9"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
 		t.Errorf("single entry: got %s, want 203.0.113.9", got)
 	}
-	// Trusted chain is popped right-to-left.
 	if got, _ := clientIP(newReq("10.0.0.1:1000", "203.0.113.9, 10.0.0.1"), cfg); !got.Equal(net.ParseIP("203.0.113.9")) {
 		t.Errorf("trusted chain: got %s, want 203.0.113.9", got)
 	}
-	// Connection from a non-trusted peer: XFF is ignored entirely.
 	if got, _ := clientIP(newReq("192.0.2.50:1000", "1.2.3.4"), cfg); !got.Equal(net.ParseIP("192.0.2.50")) {
 		t.Errorf("untrusted peer: got %s, want 192.0.2.50", got)
 	}
-	// Trusted proxy without XFF: IP resolved but marked unresolved (Tor hidden service).
 	got, resolved := clientIP(newReq("10.0.0.1:1000", ""), cfg)
 	if !got.Equal(net.ParseIP("10.0.0.1")) {
 		t.Errorf("proxy no-xff: got %s, want 10.0.0.1", got)
@@ -154,7 +152,6 @@ func TestMemoryStorePrunesRecentPaths(t *testing.T) {
 	s.LogPath("5.6.7.8", "/b")
 	s.IncrBanCount("5.6.7.8")
 
-	// Force-expire walkaway entries so both IPs look inactive.
 	for ip, e := range s.walkaways {
 		e.Expires = time.Now().Add(-time.Minute)
 		s.walkaways[ip] = e

@@ -276,8 +276,6 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	pieceTotal := pieceW + tabR
 	shape := tabShape(rng.Intn(int(shapeCount)))
 
-	// Pre-aligned answer: answer ∈ [tol+1, max] so refresh-then-verify
-	// doesn't land on the pre-set thumb position.
 	max := w - pieceTotal
 	if max < pieceTotal {
 		max = pieceTotal
@@ -295,9 +293,6 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 	scene := drawScene(w, h, rng)
 	bg := cloneRGBA(scene)
 
-	// Place 1-2 decoy bands with a different notch shape to defeat
-	// generic "find the dark region" solvers.  The real slot is drawn
-	// last so it overlays any accidental overlap.
 	sep := pieceTotal + 12
 	placed := []int{answer}
 	nDecoys := 1 + rng.Intn(2)

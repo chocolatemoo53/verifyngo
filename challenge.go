@@ -564,7 +564,14 @@ func widgetTheme(bgHex string) string {
 }
 
 func sanitizeReturnPath(path string) string {
-	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return "/"
+	}
+	second := ""
+	if len(path) > 1 {
+		second = path[1:2]
+	}
+	if second == "/" || second == "\\" {
 		return "/"
 	}
 	if strings.ContainsAny(path, "\r\n\\") {
