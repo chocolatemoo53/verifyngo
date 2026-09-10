@@ -359,7 +359,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	if !resolved {
 		requestURI := r.URL.RequestURI()
 		log.Printf("unresolved proxy %s: serving challenge without walkaway tracking (%s)", logIP(cfg, ip), sanitizeForLog(stripQuery(requestURI)))
-		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), stripQuery(requestURI), true)
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, true)
 		return
 	}
 
@@ -377,7 +377,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), stripQuery(requestURI), count == 1)
+	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, count == 1)
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store) {
