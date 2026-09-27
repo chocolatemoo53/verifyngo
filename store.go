@@ -382,8 +382,8 @@ func (s *redisStore) Block(ip string, dur time.Duration) {
 func (s *redisStore) IsBlocked(ip string) bool {
 	ok, err := s.rdb.Exists(s.ctx, s.k("blocked", ip)).Result()
 	if err != nil {
-		log.Printf("store: redis blocked check failed: %v", err)
-		return false
+		log.Printf("store: redis blocked check failed (fail-closed): %v", err)
+		return true
 	}
 	return ok > 0
 }

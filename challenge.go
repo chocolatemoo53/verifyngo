@@ -479,7 +479,7 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 	}
 
 	script := []string{"'nonce-" + nonce + "'", "'strict-dynamic'", "'wasm-unsafe-eval'", "'unsafe-eval'"}
-	style := []string{"'nonce-" + nonce + "'"}
+	style := []string{"'self'", "'nonce-" + nonce + "'"}
 	img := []string{"'self'", "data:", "blob:"}
 	font := []string{"'self'", "data:"}
 	connect := []string{"'self'", "https://cdn.jsdelivr.net"}

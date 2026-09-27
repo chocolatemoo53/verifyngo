@@ -83,6 +83,19 @@ func clientIP(r *http.Request, cfg *Config) (net.IP, bool) {
 	return connectingIP, false
 }
 
+// clientFingerprint returns the JA4 or JA5 fingerprint from request headers,
+// set by the nginx Lua module (lua/ja4_fingerprint.lua). Returns the
+// fingerprint string and true if present, or empty string and false if not.
+func clientFingerprint(r *http.Request, cfg *Config) (string, bool) {
+	if ja5 := r.Header.Get("X-JA5"); ja5 != "" {
+		return "ja5:" + ja5, true
+	}
+	if ja4 := r.Header.Get("X-JA4"); ja4 != "" {
+		return "ja4:" + ja4, true
+	}
+	return "", false
+}
+
 func stripQuery(uri string) string {
 	if i := strings.IndexByte(uri, '?'); i >= 0 {
 		return uri[:i]
@@ -275,6 +288,7 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())
@@ -337,6 +351,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	if cfg.Progressive.Enabled {
 		if pathMatchesAny(r.URL.Path, passivePaths) {
 			if pc, err := r.Cookie(cfg.CookieName + "_passive"); err == nil && pc.Value != "" {
+				if !verifyCookie(cfg.CookieSecret, pc.Value, cookieScopePassive) {
+					setPassiveCookie(w, r, cfg)
+					proxy.ServeHTTP(w, r)
+					return
+				}
 				passiveCount := store.IncrPassiveCount(pc.Value, cfg.Progressive.RequestWindow.Duration)
 				if passiveCount > cfg.Progressive.MaxRequests {
 					cookiePrefix := pc.Value
@@ -363,7 +382,27 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		return
 	}
 
+	// Per-fingerprint rate tracking: when a JA4/JA5 header is present from the
+	// nginx Lua module, track walkaways per fingerprint family (all IPs sharing
+	// the same TLS stack). This catches bot farms that rotate IPs but reuse the
+	// same TLS library (exactly the pattern GroundShade targets).
 	requestURI := r.URL.RequestURI()
+	if fp, ok := clientFingerprint(r, cfg); ok {
+		fpKey := "fp:" + fp
+		if store.IsBlocked(fpKey) {
+			log.Printf("denied %s: fingerprint %s is blocked", logIP(cfg, ip), sanitizeForLog(fp))
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		fpCount := store.IncrWalkaway(fpKey, cfg.Walkaway.TTL.Duration)
+		if fpCount >= cfg.Walkaway.Threshold {
+			store.Block(fpKey, cfg.Ban.Duration.Duration)
+			log.Printf("banned fingerprint %s after %d walk-aways (ip=%s)", sanitizeForLog(fp), fpCount, logIP(cfg, ip))
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	count := store.IncrWalkaway(ipStr, cfg.Walkaway.TTL.Duration)
 	store.LogPath(ipStr, stripQuery(requestURI))
 	if count >= cfg.Walkaway.Threshold {
@@ -394,6 +433,10 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	}
 	token := r.FormValue("token")
 	ip, _ := clientIP(r, cfg)
+	if ip == nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	ipStr := ip.String()
 	returnTo := sanitizeReturnPath(r.FormValue("return_to"))
 
