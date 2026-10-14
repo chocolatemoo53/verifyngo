@@ -32,8 +32,11 @@
     "width": 320,
     "height": 120
   },
+  "metrics_addr": "",
   "trust_real_ip": false,
   "trusted_proxies": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+  "trust_fingerprint_headers": false,
+  "tor": {"exit_list": false, "refresh": "1h"},
   "static_dir": "/static",
   "rules_file": "/rules.txt",
   "policy_file": "",
@@ -69,8 +72,8 @@
     "request_window": "10m"
   },
   "branding": {
-    "logo_url": "/static/logo.svg",
-    "css_url": "/static/custom.css",
+    "logo_url": "/__static/logo.svg",
+    "css_url": "/__static/custom.css",
     "title": "My Website",
     "accent_color": "#444444",
     "background_color": "#000000",

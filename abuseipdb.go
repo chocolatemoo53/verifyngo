@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,9 @@ import (
 
 func reportIP(cfg *Config, ip string, walkaways, banCount int, paths []string) {
 	if cfg.Anonymize() {
+		return
+	}
+	if parsed := net.ParseIP(ip); parsed == nil || parsed.IsPrivate() || parsed.IsLoopback() {
 		return
 	}
 	if !cfg.AbuseIPDB.Enabled || cfg.AbuseIPDB.APIKey == "" {
@@ -69,10 +73,10 @@ func fetchAbuseIPDBBlacklist(cfg *Config) (*ipTrie, int, error) {
 		return nil, 0, fmt.Errorf("blacklist: unexpected status %d", resp.StatusCode)
 	}
 
-	return parseAbuseIPDBBlacklist(resp.Body)
+	return parseIPList(resp.Body)
 }
 
-func parseAbuseIPDBBlacklist(r io.Reader) (*ipTrie, int, error) {
+func parseIPList(r io.Reader) (*ipTrie, int, error) {
 	trie := newIPTrie()
 	count := 0
 	scanner := bufio.NewScanner(r)
@@ -95,7 +99,7 @@ func parseAbuseIPDBBlacklist(r io.Reader) (*ipTrie, int, error) {
 		return nil, 0, err
 	}
 	if count == 0 {
-		return nil, 0, fmt.Errorf("blacklist: no IPs parsed from response")
+		return nil, 0, fmt.Errorf("no IPs parsed from response")
 	}
 	return trie, count, nil
 }
@@ -108,6 +112,7 @@ func startBlacklistFetcher(cfg *Config, box *atomic.Value) {
 			return
 		}
 		box.Store(trie)
+		metricBlocklistEntries.Set(float64(count))
 		log.Printf("abuseipdb blacklist: loaded %d IPs", count)
 	}
 	fetch()

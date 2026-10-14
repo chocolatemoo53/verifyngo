@@ -50,44 +50,9 @@ type networkGroup struct {
 
 type policyMatcher struct {
 	networks map[string]networkGroup
-	rexCache *rexCache
 
 	asnDB    *geoip2.Reader
-	asnMu    sync.RWMutex
-	asnCache map[string]uint
-}
-
-type rexCache struct {
-	mu    sync.RWMutex
-	cache map[string]*regexp.Regexp
-}
-
-func newRexCache() *rexCache {
-	return &rexCache{cache: make(map[string]*regexp.Regexp)}
-}
-
-func (c *rexCache) Get(pattern string) *regexp.Regexp {
-	c.mu.RLock()
-	re, ok := c.cache[pattern]
-	c.mu.RUnlock()
-	if ok {
-		return re
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if re, ok := c.cache[pattern]; ok {
-		return re
-	}
-	compiled, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil
-	}
-	if len(c.cache) >= 1000 {
-		c.cache = make(map[string]*regexp.Regexp, 500)
-	}
-	c.cache[pattern] = compiled
-	return compiled
+	asnCache *lruCache
 }
 
 type ipTrieNode struct {
@@ -223,18 +188,6 @@ func compilePolicyFile(cfg *Config) ([]compiledRule, error) {
 			}
 			return strings.HasPrefix(fmt.Sprint(args[0]), fmt.Sprint(args[1])), nil
 		},
-		"matches": func(args ...interface{}) (interface{}, error) {
-			if len(args) != 2 {
-				return false, nil
-			}
-			s := fmt.Sprint(args[0])
-			pat := fmt.Sprint(args[1])
-			re := matcher.rexCache.Get(pat)
-			if re == nil {
-				return false, nil
-			}
-			return re.MatchString(s), nil
-		},
 		"network": func(args ...interface{}) (interface{}, error) {
 			if len(args) != 2 {
 				return false, nil
@@ -249,7 +202,11 @@ func compilePolicyFile(cfg *Config) ([]compiledRule, error) {
 	}
 
 	out := make([]compiledRule, 0, len(p.Rules))
-	for _, r := range p.Rules {
+	for i, r := range p.Rules {
+		name := r.Name
+		if name == "" {
+			name = fmt.Sprintf("rule-%d", i+1)
+		}
 		conds := append([]string(nil), r.Conditions...)
 		if strings.TrimSpace(r.Condition) != "" {
 			conds = append(conds, r.Condition)
@@ -261,7 +218,10 @@ func compilePolicyFile(cfg *Config) ([]compiledRule, error) {
 			if err != nil {
 				return nil, fmt.Errorf("rule %q: %w", r.Name, err)
 			}
-			prepared, headerVars := rewritePolicyExpression(resolved)
+			prepared, headerVars, err := rewritePolicyExpression(resolved)
+			if err != nil {
+				return nil, fmt.Errorf("rule %q: %w", r.Name, err)
+			}
 			expr, err := govaluate.NewEvaluableExpressionWithFunctions(prepared, funcs)
 			if err != nil {
 				return nil, fmt.Errorf("rule %q: invalid condition %q: %w", r.Name, c, err)
@@ -285,6 +245,8 @@ func compilePolicyFile(cfg *Config) ([]compiledRule, error) {
 				params["userAgent"] = req.UserAgent()
 				params["method"] = req.Method
 				params["ip"] = ip.String()
+				params["browserMismatch"] = browserMismatch(req, cfg)
+				params["tor"] = torKind(req, cfg, ip)
 
 				for _, cc := range local {
 					for varName, headerName := range cc.headerVars {
@@ -299,6 +261,7 @@ func compilePolicyFile(cfg *Config) ([]compiledRule, error) {
 		}
 
 		out = append(out, compiledRule{
+			name:   name,
 			action: normalizeAction(r.Action),
 			match:  matchFn,
 		})
@@ -316,8 +279,7 @@ var evalParamsPool = sync.Pool{
 func buildPolicyMatcher(cfg *Config, groups map[string][]policyNetworkEntry) (*policyMatcher, error) {
 	m := &policyMatcher{
 		networks: make(map[string]networkGroup, len(groups)),
-		rexCache: newRexCache(),
-		asnCache: map[string]uint{},
+		asnCache: newLRUCache(maxASNCacheSize),
 	}
 	if cfg.ASN.GeoIPDBPath != "" {
 		r, err := geoip2.Open(cfg.ASN.GeoIPDBPath)
@@ -535,26 +497,6 @@ func (c compiledCondition) evalParams(params map[string]interface{}) bool {
 	return b
 }
 
-func (c compiledCondition) eval(req *http.Request, ip net.IP) bool {
-	params := evalParamsPool.Get().(map[string]interface{})
-	defer func() {
-		for k := range params {
-			delete(params, k)
-		}
-		evalParamsPool.Put(params)
-	}()
-
-	params["path"] = req.URL.Path
-	params["userAgent"] = req.UserAgent()
-	params["method"] = req.Method
-	params["ip"] = ip.String()
-
-	for varName, headerName := range c.headerVars {
-		params[varName] = req.Header.Get(headerName)
-	}
-	return c.evalParams(params)
-}
-
 func (m *policyMatcher) networkContains(ip net.IP, name string) bool {
 	g, ok := m.networks[name]
 	if !ok {
@@ -579,11 +521,8 @@ const maxASNCacheSize = 10000
 
 func (m *policyMatcher) lookupASN(ip net.IP) uint {
 	ipStr := ip.String()
-	m.asnMu.RLock()
-	cached, ok := m.asnCache[ipStr]
-	m.asnMu.RUnlock()
-	if ok {
-		return cached
+	if cached := m.asnCache.Get(ipStr); cached != nil {
+		return cached.(uint)
 	}
 
 	asn := uint(0)
@@ -593,12 +532,7 @@ func (m *policyMatcher) lookupASN(ip net.IP) uint {
 			asn = rec.AutonomousSystemNumber
 		}
 	}
-	m.asnMu.Lock()
-	if len(m.asnCache) >= maxASNCacheSize {
-		m.asnCache = make(map[string]uint, maxASNCacheSize/2)
-	}
-	m.asnCache[ipStr] = asn
-	m.asnMu.Unlock()
+	m.asnCache.Put(ipStr, asn)
 	return asn
 }
 
@@ -606,7 +540,7 @@ var condRefRe = regexp.MustCompile(`\(\$([a-zA-Z0-9_-]+)\)`)
 var headerRefRe = regexp.MustCompile(`headers\["([^"]+)"\]`)
 var containsRe = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\.contains\(`)
 var startsWithRe = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\.startsWith\(`)
-var matchesRe = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\.matches\(`)
+var matchesRe = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\.matches\(\s*`)
 
 func resolveConditionName(name string, conds map[string][]string, cache map[string]string, resolving map[string]bool) (string, error) {
 	if v, ok := cache[name]; ok {
@@ -657,7 +591,7 @@ func resolveConditionRefs(expr string, conds map[string][]string, cache map[stri
 	return resolved, nil
 }
 
-func rewritePolicyExpression(expr string) (string, map[string]string) {
+func rewritePolicyExpression(expr string) (string, map[string]string, error) {
 	headerVars := map[string]string{}
 	rewritten := headerRefRe.ReplaceAllStringFunc(expr, func(token string) string {
 		matches := headerRefRe.FindStringSubmatch(token)
@@ -673,8 +607,42 @@ func rewritePolicyExpression(expr string) (string, map[string]string) {
 	rewritten = strings.ReplaceAll(rewritten, "remoteAddress.network(", "network(ip,")
 	rewritten = containsRe.ReplaceAllString(rewritten, "contains($1,")
 	rewritten = startsWithRe.ReplaceAllString(rewritten, "startsWith($1,")
-	rewritten = matchesRe.ReplaceAllString(rewritten, "matches($1,")
-	return rewritten, headerVars
+	rewritten, err := rewriteMatches(rewritten)
+	return rewritten, headerVars, err
+}
+
+func rewriteMatches(expr string) (string, error) {
+	var b strings.Builder
+	for {
+		loc := matchesRe.FindStringSubmatchIndex(expr)
+		if loc == nil {
+			b.WriteString(expr)
+			return b.String(), nil
+		}
+		lit, rest, ok := cutStringLiteral(expr[loc[1]:])
+		rest = strings.TrimLeft(rest, " \t")
+		if !ok || !strings.HasPrefix(rest, ")") {
+			return "", fmt.Errorf("%s.matches() needs a quoted pattern", expr[loc[2]:loc[3]])
+		}
+		b.WriteString(expr[:loc[0]])
+		b.WriteString("(" + expr[loc[2]:loc[3]] + " =~ " + lit + ")")
+		expr = rest[1:]
+	}
+}
+
+func cutStringLiteral(s string) (string, string, bool) {
+	if s == "" || (s[0] != '"' && s[0] != '\'') {
+		return "", s, false
+	}
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"', '\'':
+			return s[:i+1], s[i+1:], true
+		}
+	}
+	return "", s, false
 }
 
 func sanitizeIdentifier(v string) string {

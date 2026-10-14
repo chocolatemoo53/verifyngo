@@ -11,13 +11,14 @@ import (
 )
 
 type compiledRule struct {
+	name   string
 	action string
 	match  func(*http.Request, net.IP) bool
 }
 
 func compileLegacyRules(rawRules []Rule) ([]compiledRule, error) {
 	var out []compiledRule
-	for _, r := range rawRules {
+	for i, r := range rawRules {
 		action := normalizeAction(r.Action)
 		pathExpr := strings.TrimSpace(r.Match.Path)
 		uaExpr := strings.TrimSpace(r.Match.UA)
@@ -51,6 +52,7 @@ func compileLegacyRules(rawRules []Rule) ([]compiledRule, error) {
 		}
 
 		out = append(out, compiledRule{
+			name:   fmt.Sprintf("rule-%d", i+1),
 			action: action,
 			match: func(req *http.Request, ip net.IP) bool {
 				if pathRe != nil && !pathRe.MatchString(req.URL.Path) {
@@ -74,14 +76,14 @@ func compileLegacyRules(rawRules []Rule) ([]compiledRule, error) {
 	return out, nil
 }
 
-func evaluate(rules []compiledRule, defaultAction string, r *http.Request, ip net.IP) string {
+func evaluate(rules []compiledRule, defaultAction string, r *http.Request, ip net.IP) (string, string) {
 	for _, rule := range rules {
 		if rule.match != nil && !rule.match(r, ip) {
 			continue
 		}
-		return rule.action
+		return rule.action, rule.name
 	}
-	return normalizeAction(defaultAction)
+	return normalizeAction(defaultAction), "default"
 }
 
 func normalizeAction(action string) string {

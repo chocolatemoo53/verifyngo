@@ -361,7 +361,7 @@ func (s *redisStore) IncrWalkaway(ip string, ttl time.Duration) int {
 	pipe.Expire(s.ctx, key, ttl)
 	_, err := pipe.Exec(s.ctx)
 	if err != nil {
-		log.Printf("store: redis incr walkaway failed: %v", err)
+		storeError("incr walkaway", err)
 		return 0
 	}
 	return int(incr.Val())
@@ -369,21 +369,21 @@ func (s *redisStore) IncrWalkaway(ip string, ttl time.Duration) int {
 
 func (s *redisStore) ResetWalkaway(ip string) {
 	if err := s.rdb.Del(s.ctx, s.k("walkaway", ip)).Err(); err != nil {
-		log.Printf("store: redis reset walkaway failed: %v", err)
+		storeError("reset walkaway", err)
 	}
 }
 
 func (s *redisStore) Block(ip string, dur time.Duration) {
 	if err := s.rdb.Set(s.ctx, s.k("blocked", ip), "1", dur).Err(); err != nil {
-		log.Printf("store: redis block failed: %v", err)
+		storeError("block", err)
 	}
 }
 
 func (s *redisStore) IsBlocked(ip string) bool {
 	ok, err := s.rdb.Exists(s.ctx, s.k("blocked", ip)).Result()
 	if err != nil {
-		log.Printf("store: redis blocked check failed (fail-closed): %v", err)
-		return true
+		storeError("blocked check", err)
+		return false
 	}
 	return ok > 0
 }
@@ -391,7 +391,7 @@ func (s *redisStore) IsBlocked(ip string) bool {
 func (s *redisStore) ShouldReport(ip string, cooldown time.Duration) bool {
 	ok, err := s.rdb.SetNX(s.ctx, s.k("reported", ip), "1", cooldown).Result()
 	if err != nil {
-		log.Printf("store: redis report cooldown failed: %v", err)
+		storeError("report cooldown", err)
 		return false
 	}
 	return ok
@@ -401,12 +401,12 @@ func (s *redisStore) IncrBanCount(ip string) int {
 	key := s.k("bancount", ip)
 	n, err := s.rdb.Incr(s.ctx, key).Result()
 	if err != nil {
-		log.Printf("store: redis incr ban count failed: %v", err)
+		storeError("incr ban count", err)
 		return 0
 	}
 	if n == 1 {
 		if err := s.rdb.Expire(s.ctx, key, 30*24*time.Hour).Err(); err != nil {
-			log.Printf("store: redis expire ban count failed: %v", err)
+			storeError("expire ban count", err)
 		}
 	}
 	return int(n)
@@ -419,14 +419,14 @@ func (s *redisStore) LogPath(ip, path string) {
 	pipe.LTrim(s.ctx, key, int64(-maxRecentPaths), -1)
 	pipe.Expire(s.ctx, key, 7*24*time.Hour)
 	if _, err := pipe.Exec(s.ctx); err != nil {
-		log.Printf("store: redis log path failed: %v", err)
+		storeError("log path", err)
 	}
 }
 
 func (s *redisStore) RecentPaths(ip string) []string {
 	out, err := s.rdb.LRange(s.ctx, s.k("paths", ip), 0, -1).Result()
 	if err != nil {
-		log.Printf("store: redis recent paths failed: %v", err)
+		storeError("recent paths", err)
 		return nil
 	}
 	return out
@@ -439,7 +439,7 @@ func (s *redisStore) IncrPassiveCount(cookie string, window time.Duration) int {
 	pipe.Expire(s.ctx, key, window)
 	_, err := pipe.Exec(s.ctx)
 	if err != nil {
-		log.Printf("store: redis incr passive count failed: %v", err)
+		storeError("incr passive count", err)
 		return 0
 	}
 	return int(incr.Val())

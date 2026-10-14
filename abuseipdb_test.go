@@ -11,7 +11,7 @@ func TestParseAbuseIPDBBlacklist(t *testing.T) {
 		"203.0.113.9,US,US,Test ISP,example.com,Data Center,13335,2026-08-16T10:00:00Z\n" +
 		"2001:db8::1,US,US,Test ISP,example.com,Data Center,13335,2026-08-16T10:00:00Z\n" +
 		"not-an-ip,garbage\n"
-	trie, count, err := parseAbuseIPDBBlacklist(strings.NewReader(csv))
+	trie, count, err := parseIPList(strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestParseAbuseIPDBBlacklist(t *testing.T) {
 }
 
 func TestParseAbuseIPDBBlacklistEmpty(t *testing.T) {
-	if _, _, err := parseAbuseIPDBBlacklist(strings.NewReader("# no ips here\n")); err == nil {
+	if _, _, err := parseIPList(strings.NewReader("# no ips here\n")); err == nil {
 		t.Fatal("expected error for empty blacklist")
 	}
 }

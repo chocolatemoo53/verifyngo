@@ -28,73 +28,72 @@ func isSecureRequest(r *http.Request, cfg *Config) bool {
 	return false
 }
 
-func signCookie(secret string, expiry time.Time, scope string) string {
-	payload := strconv.FormatInt(expiry.Unix(), 10) + "." + scope
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(payload))
-
-	sig := hex.EncodeToString(mac.Sum(nil))
-	return payload + "." + sig
+func cookieBinding(r *http.Request) string {
+	return r.UserAgent() + "\n" + r.Header.Get("Accept-Language")
 }
 
-func verifyCookie(secret, value string, expectedScope string) bool {
-	parts := strings.Split(value, ".")
-
-	var (
-		expiry string
-		scope  string
-		sigHex string
-	)
-
-	switch len(parts) {
-	case 2:
-		if expectedScope != cookieScopeFull {
-			return false
-		}
-		expiry = parts[0]
-		scope = cookieScopeFull
-		sigHex = parts[1]
-
-	case 3:
-		expiry = parts[0]
-		scope = parts[1]
-		sigHex = parts[2]
-
-	default:
-		return false
-	}
-
-	if scope != expectedScope {
-		return false
-	}
-
-	payload := expiry
-	if len(parts) == 3 {
-		payload += "." + scope
-	}
-
+func cookieMAC(secret, payload, binding string) []byte {
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(payload))
+	mac.Write([]byte(payload + "\n" + binding))
+	return mac.Sum(nil)
+}
 
-	expected := mac.Sum(nil)
+func signCookie(secret string, expiry time.Time, scope, tls, binding string) string {
+	payload := strconv.FormatInt(expiry.Unix(), 10) + "." + scope + "." + tls
+	return payload + "." + hex.EncodeToString(cookieMAC(secret, payload, binding))
+}
 
-	sig, err := hex.DecodeString(sigHex)
+func verifyCookie(secret, value, expectedScope, tls, binding string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) != 4 || parts[1] != expectedScope {
+		return false
+	}
+	if parts[2] != "" && tls != "" && parts[2] != tls {
+		return false
+	}
+
+	sig, err := hex.DecodeString(parts[3])
 	if err != nil {
 		return false
 	}
-
-	if !hmac.Equal(expected, sig) {
+	if !hmac.Equal(cookieMAC(secret, strings.Join(parts[:3], "."), binding), sig) {
 		return false
 	}
 
-	expUnix, err := strconv.ParseInt(expiry, 10, 64)
+	expUnix, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		return false
 	}
+	return time.Now().Before(time.Unix(expUnix, 0))
+}
 
-	now := time.Now()
-	return now.Before(time.Unix(expUnix, 0))
+func tlsCipherHash(r *http.Request, cfg *Config) string {
+	fp, ok := clientFingerprint(r, cfg)
+	if !ok {
+		return ""
+	}
+	return strings.Split(fp, "_")[1]
+}
+
+func issueCookieValue(r *http.Request, cfg *Config, expiry time.Time, scope string) string {
+	return signCookie(cfg.CookieSecret, expiry, scope, tlsCipherHash(r, cfg), cookieBinding(r))
+}
+
+func validCookieValue(r *http.Request, cfg *Config, value, scope string) bool {
+	return verifyCookie(cfg.CookieSecret, value, scope, tlsCipherHash(r, cfg), cookieBinding(r))
+}
+
+func browserMismatch(r *http.Request, cfg *Config) string {
+	ua := r.UserAgent()
+	hints := r.Header.Get("Sec-CH-UA") != ""
+	chromium := strings.Contains(ua, "Chrome/")
+	if hints && (strings.Contains(ua, "Firefox/") || (strings.Contains(ua, "Safari/") && !chromium)) {
+		return "fake"
+	}
+	if chromium && !hints && isSecureRequest(r, cfg) {
+		return "no-hints"
+	}
+	return ""
 }
 
 func newCookie(r *http.Request, cfg *Config, name, value string, expiry time.Time) *http.Cookie {
@@ -122,7 +121,7 @@ func setVerifiedCookie(w http.ResponseWriter, r *http.Request, cfg *Config) {
 		r,
 		cfg,
 		cfg.CookieName,
-		signCookie(cfg.CookieSecret, expiry, cookieScopeFull),
+		issueCookieValue(r, cfg, expiry, cookieScopeFull),
 		expiry,
 	))
 }
@@ -134,7 +133,7 @@ func setPassiveCookie(w http.ResponseWriter, r *http.Request, cfg *Config) {
 		r,
 		cfg,
 		cfg.CookieName+"_passive",
-		signCookie(cfg.CookieSecret, expiry, cookieScopePassive),
+		issueCookieValue(r, cfg, expiry, cookieScopePassive),
 		expiry,
 	))
 }
@@ -159,14 +158,5 @@ func hasValidCookie(r *http.Request, cfg *Config) bool {
 		return false
 	}
 
-	return verifyCookie(cfg.CookieSecret, c.Value, cookieScopeFull)
-}
-
-func hasValidPassiveCookie(r *http.Request, cfg *Config) bool {
-	c, err := r.Cookie(cfg.CookieName + "_passive")
-	if err != nil {
-		return false
-	}
-
-	return verifyCookie(cfg.CookieSecret, c.Value, cookieScopePassive)
+	return validCookieValue(r, cfg, c.Value, cookieScopeFull)
 }

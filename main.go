@@ -41,23 +41,27 @@ func watchRulesSource(cfg *Config, box *atomic.Value) {
 		}
 		compiled, err := loadCompiledRules(cfg)
 		if err != nil {
+			metricRuleReloads.WithLabelValues("error").Inc()
 			log.Printf("rules watch: not reloading, parse/compile error: %v", err)
 			continue
 		}
+		metricRuleReloads.WithLabelValues("ok").Inc()
 		box.Store(compiled)
 		lastMod = fi.ModTime()
 		log.Printf("reloaded policy/rules from %s", source)
 	}
 }
 
+func peerIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return net.ParseIP(r.RemoteAddr)
+	}
+	return net.ParseIP(host)
+}
+
 func clientIP(r *http.Request, cfg *Config) (net.IP, bool) {
-	connectingIP := func() net.IP {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			return net.ParseIP(r.RemoteAddr)
-		}
-		return net.ParseIP(host)
-	}()
+	connectingIP := peerIP(r)
 
 	if !cfg.TrustRealIP {
 		return connectingIP, true
@@ -83,17 +87,40 @@ func clientIP(r *http.Request, cfg *Config) (net.IP, bool) {
 	return connectingIP, false
 }
 
-// clientFingerprint returns the JA4 or JA5 fingerprint from request headers,
-// set by the nginx Lua module (lua/ja4_fingerprint.lua). Returns the
-// fingerprint string and true if present, or empty string and false if not.
+var tlsFingerprintRe = regexp.MustCompile(`^[tqd][0-9a-zA-Z]{9}_[0-9a-f]{12}_[0-9a-f]{12}(_([0-9a-f]{12})?)?$`)
+
 func clientFingerprint(r *http.Request, cfg *Config) (string, bool) {
-	if ja5 := r.Header.Get("X-JA5"); ja5 != "" {
-		return "ja5:" + ja5, true
+	if !cfg.TrustFingerprintHeaders || !cfg.compiledTrustedProxies.contains(peerIP(r)) {
+		return "", false
 	}
-	if ja4 := r.Header.Get("X-JA4"); ja4 != "" {
-		return "ja4:" + ja4, true
+	if fp := r.Header.Get("X-TLSFP"); tlsFingerprintRe.MatchString(fp) {
+		return "tlsfp:" + fp, true
+	}
+	if fp := r.Header.Get("X-JA4"); tlsFingerprintRe.MatchString(fp) {
+		return "ja4:" + fp, true
 	}
 	return "", false
+}
+
+func fingerprintKey(r *http.Request, cfg *Config, ip net.IP) (string, string, bool) {
+	fp, ok := clientFingerprint(r, cfg)
+	if !ok {
+		return "", "", false
+	}
+	return "fp:" + fp + "|" + clientNetwork(ip), fp, true
+}
+
+const (
+	failedAttemptFactor = 3
+	torAttemptFactor    = 5
+)
+
+func resetWalkaways(store Store, r *http.Request, cfg *Config, ip net.IP) {
+	store.ResetWalkaway(ip.String())
+	store.ResetWalkaway("fail:" + ip.String())
+	if key, _, ok := fingerprintKey(r, cfg, ip); ok {
+		store.ResetWalkaway(key)
+	}
 }
 
 func stripQuery(uri string) string {
@@ -134,14 +161,6 @@ func logIP(cfg *Config, ip net.IP) string {
 		return anonymizeIP(ip).String()
 	}
 	return ip.String()
-}
-
-func logIPString(cfg *Config, s string) string {
-	ip := net.ParseIP(s)
-	if ip == nil {
-		return sanitizeForLog(s)
-	}
-	return logIP(cfg, ip)
 }
 
 func compileRegexList(patterns []string) ([]*regexp.Regexp, error) {
@@ -188,16 +207,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	compiled, err := loadCompiledRules(cfg)
-	if err != nil {
-		log.Fatalf("rules: %v", err)
-	}
 	rulesBox := &atomic.Value{}
-	rulesBox.Store(compiled)
-
-	if cfg.RulesFile != "" || cfg.PolicyFile != "" {
-		go watchRulesSource(cfg, rulesBox)
-	}
+	go func() {
+		compiled, err := loadCompiledRules(cfg)
+		if err != nil {
+			metricRuleReloads.WithLabelValues("error").Inc()
+			log.Printf("rules: %v; applying default_action until the rules are fixed", err)
+		} else {
+			metricRuleReloads.WithLabelValues("ok").Inc()
+		}
+		rulesBox.Store(compiled)
+		metricRulesLoaded.Set(1)
+		log.Printf("rules loaded, checks active")
+		if cfg.RulesFile != "" || cfg.PolicyFile != "" {
+			watchRulesSource(cfg, rulesBox)
+		}
+	}()
 	store := newStore(cfg)
 
 	cfg.sliderChallenges = newSliderChallengeStore(cfg.Slider.TTL.Duration, cfg.Slider.MaxChallenges)
@@ -232,6 +257,7 @@ func main() {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		metricUpstream.WithLabelValues(strconv.Itoa(resp.StatusCode/100) + "xx").Inc()
 		resp.Header.Set("X-Content-Type-Options", "nosniff")
 		resp.Header.Set("X-Frame-Options", "DENY")
 		resp.Header.Set("Referrer-Policy", "no-referrer")
@@ -239,6 +265,19 @@ func main() {
 			resp.Header.Set("Content-Security-Policy", cfg.ResponseCSP)
 		}
 		return nil
+	}
+
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		metricUpstream.WithLabelValues("error").Inc()
+		log.Printf("upstream error: %v", err)
+		w.WriteHeader(http.StatusBadGateway)
+	}
+
+	if cfg.MetricsAddr != "" {
+		go serveMetrics(cfg.MetricsAddr)
+	}
+	if cfg.Tor.ExitList {
+		go startTorExitFetcher(cfg)
 	}
 
 	mux := http.NewServeMux()
@@ -275,11 +314,12 @@ func main() {
 	})
 
 	if cfg.StaticDir != "" {
-		mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(cfg.StaticDir))))
+		mux.Handle("/__static/", http.StripPrefix("/__static/", http.FileServer(http.Dir(cfg.StaticDir))))
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, cfg, rulesBox.Load().([]compiledRule), passivePaths, bypassPaths, alwaysPassPaths, store, blacklistBox, proxy)
+		rules, loaded := rulesBox.Load().([]compiledRule)
+		metricDecisions.WithLabelValues(handleRequest(w, r, cfg, rules, loaded, passivePaths, bypassPaths, alwaysPassPaths, store, blacklistBox, proxy)).Inc()
 	})
 
 	log.Printf("listening on %s, proxying to %s (provider=%s)", cfg.ListenAddr, cfg.UpstreamURL, cfg.Provider)
@@ -294,84 +334,99 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) {
+func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, loaded bool, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) string {
 	ip, resolved := clientIP(r, cfg)
 	if ip == nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+		return "bad_request"
 	}
 	ipStr := ip.String()
+	tor := torKind(r, cfg, ip)
+	shared := sharedTorIP(tor, ip)
+	if tor != "" {
+		metricTor.WithLabelValues(tor).Inc()
+	}
 
 	if ipAllowlisted(cfg, ip) {
 		proxy.ServeHTTP(w, r)
-		return
+		return "allowlisted"
 	}
 
 	if pathMatchesAny(r.URL.Path, alwaysPassPaths) {
 		proxy.ServeHTTP(w, r)
-		return
+		return "always_pass"
 	}
 
 	if hasValidCookie(r, cfg) {
 		proxy.ServeHTTP(w, r)
-		return
+		return "verified"
 	}
 
 	if pathMatchesAny(r.URL.Path, bypassPaths) {
 		proxy.ServeHTTP(w, r)
-		return
+		return "bypass"
 	}
 
-	if store.IsBlocked(ipStr) {
+	if !shared && store.IsBlocked(ipStr) {
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		return "banned"
 	}
 
-	if blacklist != nil {
+	if blacklist != nil && tor == "" {
 		if trie, ok := blacklist.Load().(*ipTrie); ok && trie != nil && trie.Contains(ip) {
 			log.Printf("denied %s: on AbuseIPDB blacklist", logIP(cfg, ip))
 			http.Error(w, "forbidden", http.StatusForbidden)
-			return
+			return "blocklist"
 		}
 	}
 
-	action := evaluate(rules, cfg.DefaultAction, r, ip)
+	if !loaded {
+		proxy.ServeHTTP(w, r)
+		return "rules_loading"
+	}
+	action, rule := evaluate(rules, cfg.DefaultAction, r, ip)
+	metricRuleHits.WithLabelValues(rule, action).Inc()
 	switch action {
 	case "allow":
 		proxy.ServeHTTP(w, r)
-		return
+		return "allow"
 	case "deny":
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		return "deny"
 	case "tarpit":
 		serveTarpit(w, r, cfg)
-		return
+		return "tarpit"
 	}
 
-	if cfg.Progressive.Enabled {
-		if pathMatchesAny(r.URL.Path, passivePaths) {
-			if pc, err := r.Cookie(cfg.CookieName + "_passive"); err == nil && pc.Value != "" {
-				if !verifyCookie(cfg.CookieSecret, pc.Value, cookieScopePassive) {
-					setPassiveCookie(w, r, cfg)
-					proxy.ServeHTTP(w, r)
-					return
-				}
-				passiveCount := store.IncrPassiveCount(pc.Value, cfg.Progressive.RequestWindow.Duration)
-				if passiveCount > cfg.Progressive.MaxRequests {
-					cookiePrefix := pc.Value
-					if len(cookiePrefix) > 8 {
-						cookiePrefix = cookiePrefix[:8]
-					}
-					log.Printf("passive rate limit hit cookie=%s... count=%d max=%d", sanitizeForLog(cookiePrefix), passiveCount, cfg.Progressive.MaxRequests)
-				} else {
-					proxy.ServeHTTP(w, r)
-					return
-				}
-			} else {
-				setPassiveCookie(w, r, cfg)
+	if cfg.Progressive.Enabled && tor == "" && pathMatchesAny(r.URL.Path, passivePaths) {
+		pc, err := r.Cookie(cfg.CookieName + "_passive")
+		mismatch := browserMismatch(r, cfg)
+		switch {
+		case mismatch != "":
+			metricBrowserMismatch.WithLabelValues(mismatch).Inc()
+			metricPassive.WithLabelValues("mismatch").Inc()
+			log.Printf("browser mismatch ip=%s kind=%s: no passive pass", logIP(cfg, ip), mismatch)
+		case err == nil && validCookieValue(r, cfg, pc.Value, cookieScopePassive):
+			passiveCount := store.IncrPassiveCount(pc.Value, cfg.Progressive.RequestWindow.Duration)
+			if passiveCount <= cfg.Progressive.MaxRequests {
+				metricPassive.WithLabelValues("pass").Inc()
 				proxy.ServeHTTP(w, r)
-				return
+				return "passive"
 			}
+			metricPassive.WithLabelValues("budget_exhausted").Inc()
+			cookiePrefix := pc.Value
+			if len(cookiePrefix) > 8 {
+				cookiePrefix = cookiePrefix[:8]
+			}
+			log.Printf("passive rate limit hit cookie=%s... count=%d max=%d", sanitizeForLog(cookiePrefix), passiveCount, cfg.Progressive.MaxRequests)
+		case store.IncrPassiveCount("net:"+clientNetwork(ip), cfg.Progressive.RequestWindow.Duration) <= cfg.Progressive.MaxRequests:
+			metricPassive.WithLabelValues("new").Inc()
+			setPassiveCookie(w, r, cfg)
+			proxy.ServeHTTP(w, r)
+			return "passive"
+		default:
+			metricPassive.WithLabelValues("network_limit").Inc()
+			log.Printf("passive cookie limit hit ip=%s: too many new passive cookies from this network", logIP(cfg, ip))
 		}
 	}
 
@@ -379,44 +434,75 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		requestURI := r.URL.RequestURI()
 		log.Printf("unresolved proxy %s: serving challenge without walkaway tracking (%s)", logIP(cfg, ip), sanitizeForLog(stripQuery(requestURI)))
 		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, true)
-		return
+		return "challenge"
 	}
 
-	// Per-fingerprint rate tracking: when a JA4/JA5 header is present from the
-	// nginx Lua module, track walkaways per fingerprint family (all IPs sharing
-	// the same TLS stack). This catches bot farms that rotate IPs but reuse the
-	// same TLS library (exactly the pattern GroundShade targets).
 	requestURI := r.URL.RequestURI()
-	if fp, ok := clientFingerprint(r, cfg); ok {
-		fpKey := "fp:" + fp
+	if shared {
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, false)
+		return "challenge"
+	}
+	if fpKey, fp, ok := fingerprintKey(r, cfg, ip); ok {
 		if store.IsBlocked(fpKey) {
 			log.Printf("denied %s: fingerprint %s is blocked", logIP(cfg, ip), sanitizeForLog(fp))
 			http.Error(w, "forbidden", http.StatusForbidden)
-			return
+			return "banned"
 		}
 		fpCount := store.IncrWalkaway(fpKey, cfg.Walkaway.TTL.Duration)
 		if fpCount >= cfg.Walkaway.Threshold {
 			store.Block(fpKey, cfg.Ban.Duration.Duration)
+			metricBans.WithLabelValues("fingerprint").Inc()
 			log.Printf("banned fingerprint %s after %d walk-aways (ip=%s)", sanitizeForLog(fp), fpCount, logIP(cfg, ip))
 			http.Error(w, "forbidden", http.StatusForbidden)
-			return
+			return "banned"
 		}
 	}
 
 	count := store.IncrWalkaway(ipStr, cfg.Walkaway.TTL.Duration)
 	store.LogPath(ipStr, stripQuery(requestURI))
 	if count >= cfg.Walkaway.Threshold {
-		store.Block(ipStr, cfg.Ban.Duration.Duration)
-		banCount := store.IncrBanCount(ipStr)
-		paths := store.RecentPaths(ipStr)
-		log.Printf("banned %s after %d walk-aways (ban #%d); recent paths: %v", logIP(cfg, ip), count, banCount, sanitizeForLog(fmt.Sprint(paths)))
-		if banCount >= cfg.AbuseIPDB.ReportAfterBans && store.ShouldReport(ipStr, 15*time.Minute) {
-			reportIP(cfg, ipStr, count, banCount, paths)
-		}
+		banClient(cfg, store, ip, count, "walk-aways")
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		return "banned"
 	}
 	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, count == 1)
+	return "challenge"
+}
+
+func banClient(cfg *Config, store Store, ip net.IP, count int, reason string) {
+	ipStr := ip.String()
+	store.Block(ipStr, cfg.Ban.Duration.Duration)
+	metricBans.WithLabelValues(reason).Inc()
+	banCount := store.IncrBanCount(ipStr)
+	paths := store.RecentPaths(ipStr)
+	log.Printf("banned %s after %d %s (ban #%d); recent paths: %v", logIP(cfg, ip), count, reason, banCount, sanitizeForLog(fmt.Sprint(paths)))
+	if banCount >= cfg.AbuseIPDB.ReportAfterBans && store.ShouldReport(ipStr, 15*time.Minute) {
+		reportIP(cfg, ipStr, count, banCount, paths)
+	}
+}
+
+const (
+	penaltyNone     = ""
+	penaltyFailed   = "failed attempts"
+	penaltyWalkaway = "walk-aways"
+)
+
+func retryChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo, penalty string) {
+	if sharedTorIP(torKind(r, cfg, ip), ip) {
+		penalty = penaltyNone
+	}
+	key, limit := ip.String(), cfg.Walkaway.Threshold
+	if penalty == penaltyFailed {
+		key, limit = "fail:"+key, failedAttemptFactor*limit
+	}
+	if penalty != penaltyNone {
+		if n := store.IncrWalkaway(key, cfg.Walkaway.TTL.Duration); n >= limit {
+			banClient(cfg, store, ip, n, penalty)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, false)
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store) {
@@ -445,7 +531,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	log.Printf("verify start ip=%s provider=%s return_to=%s token_len=%d", logIP(cfg, ip), provider, sanitizeForLog(returnTo), len(token))
 
 	if provider == "slider" {
-		handleSliderVerify(w, r, cfg, store, ipStr, returnTo)
+		handleSliderVerify(w, r, cfg, store, ip, returnTo)
 		return
 	}
 
@@ -453,66 +539,78 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 
 	ok, err := verifier.Verify(token, ipStr)
 	if err != nil {
+		metricChallenges.WithLabelValues(provider, "error").Inc()
 		log.Printf("verify error ip=%s provider=%s err=%v", logIP(cfg, ip), provider, err)
-		http.Redirect(w, r, returnTo, http.StatusFound)
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyNone)
 		return
 	}
 	if !ok {
+		metricChallenges.WithLabelValues(provider, "failed").Inc()
 		log.Printf("verify failed ip=%s provider=%s", logIP(cfg, ip), provider)
-		http.Redirect(w, r, returnTo, http.StatusFound)
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyFailed)
 		return
 	}
 
+	metricChallenges.WithLabelValues(provider, "passed").Inc()
 	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s secure=%v)", logIP(cfg, ip), provider, cfg.CookieName, isSecureRequest(r, cfg))
 
-	store.ResetWalkaway(ipStr)
+	resetWalkaways(store, r, cfg, ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
 	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
-func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip, returnTo string) {
+func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo string) {
+	ipStr := ip.String()
 	captchaID := r.FormValue("captcha_id")
 	answerStr := r.FormValue("answer")
 	answer, err := strconv.Atoi(answerStr)
 	if err != nil || answer < 0 || answer > 1500 {
-		log.Printf("slider verify failed ip=%s id=%v answer=%q", logIPString(cfg, ip), captchaID, sanitizeForLog(answerStr))
-		http.Redirect(w, r, returnTo, http.StatusFound)
+		metricChallenges.WithLabelValues("slider", "failed").Inc()
+		log.Printf("slider verify failed ip=%s id=%v answer=%q", logIP(cfg, ip), captchaID, sanitizeForLog(answerStr))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyFailed)
 		return
 	}
 
-	if !cfg.sliderChallenges.allowAttempt(ip, sliderVerifyWindow, sliderVerifyMaxPerMin) {
-		log.Printf("slider verify throttled ip=%s", logIPString(cfg, ip))
-		http.Redirect(w, r, returnTo, http.StatusFound)
+	maxAttempts := sliderVerifyMaxPerMin
+	if sharedTorIP(torKind(r, cfg, ip), ip) {
+		maxAttempts *= torAttemptFactor
+	}
+	if !cfg.sliderChallenges.allowAttempt(ipStr, sliderVerifyWindow, maxAttempts) {
+		metricChallenges.WithLabelValues("slider", "throttled").Inc()
+		log.Printf("slider verify throttled ip=%s", logIP(cfg, ip))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyNone)
 		return
 	}
 
 	res := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance, cfg.Slider.MinSolveTime.Duration)
-	lowVariance := cfg.sliderChallenges.recordAnswer(ip, answer, sliderAnswerSamples, cfg.Slider.Tolerance, sliderAnswerWindow)
+	lowVariance := cfg.sliderChallenges.recordAnswer(ipStr, answer, sliderAnswerSamples, cfg.Slider.Tolerance, sliderAnswerWindow)
 
 	if res.tooFast {
-		store.IncrWalkaway(ip, cfg.Walkaway.TTL.Duration)
-		log.Printf("slider verify too fast ip=%s", logIPString(cfg, ip))
-		http.Redirect(w, r, returnTo, http.StatusFound)
+		metricChallenges.WithLabelValues("slider", "automated").Inc()
+		log.Printf("slider verify too fast ip=%s", logIP(cfg, ip))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyWalkaway)
 		return
 	}
 	if !res.ok {
-		log.Printf("slider verify failed ip=%s id=%v answer=%d", logIPString(cfg, ip), captchaID, answer)
-		http.Redirect(w, r, returnTo, http.StatusFound)
+		metricChallenges.WithLabelValues("slider", "failed").Inc()
+		log.Printf("slider verify failed ip=%s id=%v answer=%d", logIP(cfg, ip), captchaID, answer)
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyFailed)
 		return
 	}
 	if lowVariance {
-		store.IncrWalkaway(ip, cfg.Walkaway.TTL.Duration)
-		log.Printf("slider verify suspicious (repeated answers) ip=%s", logIPString(cfg, ip))
-		http.Redirect(w, r, returnTo, http.StatusFound)
+		metricChallenges.WithLabelValues("slider", "automated").Inc()
+		log.Printf("slider verify suspicious (repeated answers) ip=%s", logIP(cfg, ip))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyWalkaway)
 		return
 	}
 
-	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", logIPString(cfg, ip), cfg.CookieName, isSecureRequest(r, cfg))
-	store.ResetWalkaway(ip)
+	metricChallenges.WithLabelValues("slider", "passed").Inc()
+	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", logIP(cfg, ip), cfg.CookieName, isSecureRequest(r, cfg))
+	resetWalkaways(store, r, cfg, ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
-	log.Printf("redirecting ip=%s to %s", logIPString(cfg, ip), sanitizeForLog(returnTo))
+	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }

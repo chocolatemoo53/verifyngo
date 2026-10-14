@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type Rule struct {
 
 type Config struct {
 	ListenAddr   string   `json:"listen_addr"`
+	MetricsAddr  string   `json:"metrics_addr"`
 	UpstreamURL  string   `json:"upstream_url"`
 	CookieSecret string   `json:"cookie_secret"`
 	CookieName   string   `json:"cookie_name"`
@@ -97,8 +99,14 @@ type Config struct {
 		} `json:"blacklist"`
 	} `json:"abuseipdb"`
 
-	TrustRealIP    bool     `json:"trust_real_ip"`
-	TrustedProxies []string `json:"trusted_proxies"`
+	TrustRealIP             bool     `json:"trust_real_ip"`
+	TrustedProxies          []string `json:"trusted_proxies"`
+	TrustFingerprintHeaders bool     `json:"trust_fingerprint_headers"`
+
+	Tor struct {
+		ExitList bool     `json:"exit_list"`
+		Refresh  Duration `json:"refresh"`
+	} `json:"tor"`
 
 	StaticDir  string `json:"static_dir"`
 	RulesFile  string `json:"rules_file"`
@@ -114,6 +122,7 @@ type Config struct {
 
 	compiledWhitelist      compiledWhitelist
 	compiledTrustedProxies compiledWhitelist
+	torExits               atomic.Value
 	sliderChallenges       *sliderChallengeStore
 
 	Store struct {
@@ -271,6 +280,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	cfg.compiledWhitelist = compileWhitelist(cfg.Whitelist)
 	cfg.compiledTrustedProxies = compileWhitelist(cfg.TrustedProxies)
+	if cfg.Tor.Refresh.Duration <= 0 {
+		cfg.Tor.Refresh.Duration = time.Hour
+	}
 
 	cfg.tarpitSeedStr = cfg.Tarpit.Seed
 	if cfg.tarpitSeedStr == "" {
@@ -283,6 +295,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.TrustRealIP && len(cfg.TrustedProxies) == 0 {
 		return nil, fmt.Errorf("trust_real_ip requires trusted_proxies listing your reverse proxy IPs/CIDRs (e.g. [\"127.0.0.0/8\", \"172.16.0.0/12\", \"10.0.0.0/8\", \"192.168.0.0/16\"] for Docker/nginx-on-host setups)")
+	}
+	if cfg.TrustFingerprintHeaders && len(cfg.TrustedProxies) == 0 {
+		return nil, fmt.Errorf("trust_fingerprint_headers requires trusted_proxies listing the reverse proxy that sets X-JA4 and X-TLSFP")
 	}
 	if cfg.AbuseIPDB.Enabled && cfg.Anonymize() {
 		log.Println("NOTE: anonymize_ips is enabled — AbuseIPDB reporting is disabled (reports must carry the real IP); blacklist fetching still works")

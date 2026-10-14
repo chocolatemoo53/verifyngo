@@ -348,6 +348,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	}
 
 	provider := providerForRequest(cfg, r)
+	metricChallenges.WithLabelValues(provider, "issued").Inc()
 
 	var switcher template.HTML
 	available := availableProviders(cfg)
@@ -605,6 +606,11 @@ func providerForRequest(cfg *Config, r *http.Request) string {
 			if cfg.Slider.Enabled {
 				return "slider"
 			}
+		}
+	}
+	if cfg.Slider.Enabled {
+		if ip, _ := clientIP(r, cfg); ip != nil && torKind(r, cfg, ip) != "" {
+			return "slider"
 		}
 	}
 	if cfg.Provider != "" {
