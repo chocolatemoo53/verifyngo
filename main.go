@@ -251,11 +251,11 @@ func main() {
 		log.Fatalf("always_pass_paths: %v", err)
 	}
 
-	upstream, err := url.Parse(cfg.UpstreamURL)
+	upstreamURL, err := url.Parse(cfg.UpstreamURL)
 	if err != nil {
 		log.Fatalf("upstream_url: %v", err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		metricUpstream.WithLabelValues(strconv.Itoa(resp.StatusCode/100) + "xx").Inc()
 		resp.Header.Set("X-Content-Type-Options", "nosniff")
@@ -272,6 +272,8 @@ func main() {
 		log.Printf("upstream error: %v", err)
 		w.WriteHeader(http.StatusBadGateway)
 	}
+
+	upstream := withoutDeadlines(proxy)
 
 	if cfg.MetricsAddr != "" {
 		go serveMetrics(cfg.MetricsAddr)
@@ -319,7 +321,7 @@ func main() {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		rules, loaded := rulesBox.Load().([]compiledRule)
-		metricDecisions.WithLabelValues(handleRequest(w, r, cfg, rules, loaded, passivePaths, bypassPaths, alwaysPassPaths, store, blacklistBox, proxy)).Inc()
+		metricDecisions.WithLabelValues(handleRequest(w, r, cfg, rules, loaded, passivePaths, bypassPaths, alwaysPassPaths, store, blacklistBox, upstream)).Inc()
 	})
 
 	log.Printf("listening on %s, proxying to %s (provider=%s)", cfg.ListenAddr, cfg.UpstreamURL, cfg.Provider)
@@ -334,7 +336,16 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, loaded bool, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy *httputil.ReverseProxy) string {
+func withoutDeadlines(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		rc.SetReadDeadline(time.Time{})
+		rc.SetWriteDeadline(time.Time{})
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, loaded bool, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy http.Handler) string {
 	ip, resolved := clientIP(r, cfg)
 	if ip == nil {
 		http.Error(w, "bad request", http.StatusBadRequest)

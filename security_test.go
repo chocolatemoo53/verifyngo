@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -518,5 +520,43 @@ func TestOnionCircuitsBannedSeparately(t *testing.T) {
 	}
 	if store.IsBlocked("fc00:dead:beef:4dad::bb") {
 		t.Error("another circuit must not share that ban")
+	}
+}
+
+func TestSlowUploadSurvivesReadTimeout(t *testing.T) {
+	upload := func(h http.Handler) (int, error) {
+		srv := httptest.NewUnstartedServer(h)
+		srv.Config.ReadTimeout = 200 * time.Millisecond
+		srv.Start()
+		defer srv.Close()
+
+		pr, pw := io.Pipe()
+		go func() {
+			for i := 0; i < 6; i++ {
+				pw.Write([]byte("chunk"))
+				time.Sleep(100 * time.Millisecond)
+			}
+			pw.Close()
+		}()
+		resp, err := http.Post(srv.URL, "application/octet-stream", pr)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != strings.Repeat("chunk", 6) {
+			return resp.StatusCode, fmt.Errorf("upstream got %q", body)
+		}
+		return resp.StatusCode, nil
+	}
+	echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(w, r.Body)
+	})
+
+	if _, err := upload(echo); err == nil {
+		t.Fatal("the slow upload should fail without clearing the deadline, so this test proves nothing")
+	}
+	if code, err := upload(withoutDeadlines(echo)); err != nil || code != http.StatusOK {
+		t.Errorf("slow upload through withoutDeadlines: code=%d err=%v", code, err)
 	}
 }
