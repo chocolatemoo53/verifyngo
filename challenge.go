@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -80,7 +81,9 @@ const challengeTpl = `<!DOCTYPE html>
   html, body {
     margin: 0;
     padding: 0;
+    background: {{.BackgroundColor}};
     background: var(--cp-bg);
+    color: {{.TextColor}};
     color: var(--cp-text);
     font-family: var(--cp-font);
   }
@@ -184,11 +187,14 @@ const challengeTpl = `<!DOCTYPE html>
   }
   .verifyngo-switch-current {
     color: {{.AccentTextColor}};
+    background: {{.AccentColor}};
     background: var(--cp-accent);
   }
   .verifyngo-switch a,
   .verifyngo-switch a:visited {
+    color: {{.AccentColor}};
     color: var(--cp-accent);
+    border: 1px solid {{.AccentColor}};
     border: 1px solid var(--cp-accent);
   }
   .verifyngo-submit {
@@ -197,6 +203,7 @@ const challengeTpl = `<!DOCTYPE html>
     font-size: 1rem;
     font-weight: 600;
     color: {{.AccentTextColor}};
+    background: {{.AccentColor}};
     background: var(--cp-accent);
     border: none;
     border-radius: 8px;
@@ -231,6 +238,16 @@ const challengeTpl = `<!DOCTYPE html>
   <input type="hidden" id="verifyngo-return-to" value="{{.ReturnTo}}">
   {{if eq .Provider "cap"}}
   <cap-widget id="widget" data-cap-api-endpoint="{{.APIURL}}/{{.SiteKey}}/"></cap-widget>
+  {{if .SliderSwitchURL}}<script nonce="{{.Nonce}}">
+    (function(){
+      if (window.customElements && window.WebAssembly && window.Element && Element.prototype.attachShadow) return;
+      try {
+        if (!navigator.cookieEnabled || sessionStorage.getItem('verifyngo-slider')) return;
+        sessionStorage.setItem('verifyngo-slider', '1');
+      } catch (e) { return; }
+      location.replace({{.SliderSwitchURL}});
+    })();
+  </script>{{end}}
   <script nonce="{{.Nonce}}">
     document.getElementById('widget').addEventListener('solve', function(e){
       var f = document.createElement('form');
@@ -291,6 +308,23 @@ const challengeTpl = `<!DOCTYPE html>
       background: transparent;
     }
     .verifyngo-range::-moz-range-thumb {
+      height: 100%;
+      width: {{.SliderPiecePct}}%;
+      border: none;
+      border-radius: 0;
+      background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
+    }
+    .verifyngo-range::-ms-track {
+      height: 100%;
+      background: transparent;
+      border-color: transparent;
+      color: transparent;
+    }
+    .verifyngo-range::-ms-fill-lower,
+    .verifyngo-range::-ms-fill-upper {
+      background: transparent;
+    }
+    .verifyngo-range::-ms-thumb {
       height: 100%;
       width: {{.SliderPiecePct}}%;
       border: none;
@@ -377,6 +411,14 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		switcher = template.HTML(b.String())
 	}
 
+	sliderSwitchURL := ""
+	if provider == "cap" && cfg.Slider.Enabled {
+		sliderSwitchURL = (&url.URL{
+			Path:     "/__set_provider",
+			RawQuery: "provider=slider&return_to=" + url.QueryEscape(requestURI),
+		}).String()
+	}
+
 	scriptURL := scriptURLForRequest(cfg, r)
 
 	sliderID := ""
@@ -449,6 +491,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		"SliderPiecePct":    sliderPiecePct,
 		"SliderMax":         sliderMax,
 		"SliderWidth":       sliderWidth,
+		"SliderSwitchURL":   sliderSwitchURL,
 	})
 }
 
@@ -587,6 +630,46 @@ func sanitizeReturnPath(path string) string {
 }
 
 func providerForRequest(cfg *Config, r *http.Request) string {
+	p := chosenProvider(cfg, r)
+	if p == "cap" && cfg.Slider.Enabled && capUnsupported(r.UserAgent()) {
+		if ck, err := r.Cookie("cp_provider"); err != nil || ck.Value != "cap" {
+			return "slider"
+		}
+	}
+	return p
+}
+
+var (
+	chromeMajor  = regexp.MustCompile(`Chrom(?:e|ium)/(\d+)`)
+	firefoxMajor = regexp.MustCompile(`Firefox/(\d+)`)
+	safariMajor  = regexp.MustCompile(`Version/(\d+)[.\d]* (?:Mobile/\S+ )?Safari/`)
+)
+
+func capUnsupported(ua string) bool {
+	if strings.Contains(ua, "MSIE ") || strings.Contains(ua, "Trident/") || strings.Contains(ua, " Edge/") {
+		return true
+	}
+	major := func(re *regexp.Regexp) (int, bool) {
+		m := re.FindStringSubmatch(ua)
+		if m == nil {
+			return 0, false
+		}
+		n, err := strconv.Atoi(m[1])
+		return n, err == nil
+	}
+	if n, ok := major(chromeMajor); ok {
+		return n < 84
+	}
+	if n, ok := major(firefoxMajor); ok {
+		return n < 90
+	}
+	if n, ok := major(safariMajor); ok {
+		return n < 15
+	}
+	return false
+}
+
+func chosenProvider(cfg *Config, r *http.Request) string {
 	if ck, err := r.Cookie("cp_provider"); err == nil && ck.Value != "" {
 		p := ck.Value
 		switch p {
