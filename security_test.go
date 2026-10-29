@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -352,6 +354,7 @@ func testServer(t *testing.T, cfgJSON string) (*Config, Store, func(r *http.Requ
 	cfg.sliderChallenges = newSliderChallengeStore(time.Minute, 100)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Upstream", "1")
+		io.Copy(w, r.Body)
 	}))
 	t.Cleanup(upstream.Close)
 	u, _ := url.Parse(upstream.URL)
@@ -573,5 +576,128 @@ func TestCapCheckmark(t *testing.T) {
 		if c := capCheckmark(bad); c != "" {
 			t.Fatalf("capCheckmark(%q) = %q, want empty", bad, c)
 		}
+	}
+}
+
+var hiddenInputRe = regexp.MustCompile(`<input type="hidden" (?:id="[^"]*" )?name="([^"]+)" value="([^"]*)">`)
+
+func hiddenInputs(page string) url.Values {
+	out := url.Values{}
+	for _, m := range hiddenInputRe.FindAllStringSubmatch(page, -1) {
+		out.Add(html.UnescapeString(m[1]), html.UnescapeString(m[2]))
+	}
+	return out
+}
+
+func formPost(path string, form url.Values, site string) *http.Request {
+	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "Mozilla/5.0 Firefox/143.0")
+	if site != "" {
+		req.Header.Set("Sec-Fetch-Site", site)
+	}
+	req.RemoteAddr = "198.51.100.30:1000"
+	return req
+}
+
+func TestReplayCapturedOnEveryProvider(t *testing.T) {
+	cfg, _, serve := testServer(t, testConfig)
+	cfg.Cap.SiteKey, cfg.HCaptcha.SiteKey, cfg.Turnstile.SiteKey = "k", "k", "k"
+	for _, provider := range []string{"slider", "cap", "hcaptcha", "turnstile"} {
+		cfg.Provider = provider
+		page := serve(formPost("/search", url.Values{"q": {`cats "&" <dogs>`}}, "same-origin"), true).Body.String()
+		if n := strings.Count(page, `name="__replay_q"`); n != 1 {
+			t.Errorf("%s: replay field rendered %d times, want 1", provider, n)
+		}
+		if got := hiddenInputs(page).Get("__replay_q"); got != `cats "&" <dogs>` {
+			t.Errorf("%s: replay value = %q", provider, got)
+		}
+		if strings.Contains(page, "<dogs>") {
+			t.Errorf("%s: replay value was not escaped", provider)
+		}
+	}
+	if !strings.Contains(challengeTpl, "f.appendChild(document.getElementById('verifyngo-replay'))") {
+		t.Error("cap form must carry the replay fields")
+	}
+}
+
+func TestReplayIgnoredWhenUnsafe(t *testing.T) {
+	_, _, serve := testServer(t, testConfig)
+	cases := map[string]*http.Request{
+		"cross-site": formPost("/search", url.Values{"q": {"cats"}}, "cross-site"),
+		"no origin":  formPost("/search", url.Values{"q": {"cats"}}, ""),
+		"too large":  formPost("/search", url.Values{"q": {strings.Repeat("a", maxReplayBytes)}}, "same-origin"),
+	}
+	multipart := formPost("/upload", nil, "same-origin")
+	multipart.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	cases["multipart"] = multipart
+	for name, req := range cases {
+		if page := serve(req, true).Body.String(); strings.Contains(page, "__replay_") {
+			t.Errorf("%s: form fields must not be carried", name)
+		}
+	}
+}
+
+func TestFinishVerifyResubmits(t *testing.T) {
+	form := url.Values{"__replay_q": {"cats"}, "__replay_category_general": {"1"}, "return_to": {"/search"}}
+	req := formPost("/__verify", form, "same-origin")
+	req.ParseForm()
+	w := httptest.NewRecorder()
+	finishVerify(w, req, "/search")
+	page := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(page, `action="/search"`) || !strings.Contains(page, "<button type=\"submit\">Continue</button>") {
+		t.Fatalf("expected a resubmit page, got %d:\n%s", w.Code, page)
+	}
+	if got := hiddenInputs(page); got.Get("q") != "cats" || got.Get("category_general") != "1" || len(got) != 2 {
+		t.Errorf("resubmit fields = %v", got)
+	}
+
+	plain := formPost("/__verify", url.Values{"return_to": {"/search"}}, "same-origin")
+	plain.ParseForm()
+	w = httptest.NewRecorder()
+	finishVerify(w, plain, "/search")
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "/search" {
+		t.Errorf("without replay fields: got %d %q, want a redirect", w.Code, w.Header().Get("Location"))
+	}
+
+	cross := formPost("/__verify", form, "cross-site")
+	cross.ParseForm()
+	w = httptest.NewRecorder()
+	finishVerify(w, cross, "/search")
+	if w.Code != http.StatusFound {
+		t.Errorf("cross-site verify must not resubmit, got %d", w.Code)
+	}
+}
+
+func TestSearchPostSurvivesChallenge(t *testing.T) {
+	cfg, store, serve := testServer(t, testConfig)
+	page := serve(formPost("/search", url.Values{"q": {"cats"}}, "same-origin"), true).Body.String()
+	fields := hiddenInputs(page)
+	id := fields.Get("captcha_id")
+
+	cfg.sliderChallenges.mu.Lock()
+	ch, ok := cfg.sliderChallenges.challenges[id]
+	ch.issued = time.Now().Add(-5 * time.Second)
+	cfg.sliderChallenges.challenges[id] = ch
+	cfg.sliderChallenges.mu.Unlock()
+	if !ok {
+		t.Fatalf("no slider challenge issued, page:\n%s", page)
+	}
+
+	fields.Set("answer", strconv.Itoa(ch.answer))
+	w := httptest.NewRecorder()
+	handleVerify(w, formPost("/__verify", fields, "same-origin"), cfg, store)
+	resubmit := hiddenInputs(w.Body.String())
+	if w.Code != http.StatusOK || resubmit.Get("q") != "cats" {
+		t.Fatalf("verify: got %d with fields %v", w.Code, resubmit)
+	}
+
+	again := formPost("/search", resubmit, "same-origin")
+	for _, c := range w.Result().Cookies() {
+		again.AddCookie(c)
+	}
+	res := serve(again, true)
+	if res.Header().Get("X-Test-Decision") != "verified" || res.Body.String() != "q=cats" {
+		t.Errorf("resubmitted search: decision %q, upstream got %q", res.Header().Get("X-Test-Decision"), res.Body.String())
 	}
 }

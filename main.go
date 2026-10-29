@@ -569,7 +569,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
 	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	finishVerify(w, r, returnTo)
 }
 
 func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo string) {
@@ -623,5 +623,5 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
 	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	finishVerify(w, r, returnTo)
 }
