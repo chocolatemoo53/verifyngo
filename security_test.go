@@ -560,3 +560,18 @@ func TestSlowUploadSurvivesReadTimeout(t *testing.T) {
 		t.Errorf("slow upload through withoutDeadlines: code=%d err=%v", code, err)
 	}
 }
+
+func TestCapCheckmark(t *testing.T) {
+	got := string(capCheckmark("#E0218A"))
+	if !strings.HasPrefix(got, `url("data:image/svg+xml,`) || !strings.Contains(got, "%23E0218A") {
+		t.Fatalf("checkmark missing accent: %s", got)
+	}
+	if strings.ContainsAny(strings.TrimSuffix(strings.TrimPrefix(got, `url("`), `")`), `"'() `) {
+		t.Fatalf("checkmark not escaped for CSS: %s", got)
+	}
+	for _, bad := range []string{"", "red", "#fff", `#12345"`, "#zzzzzz"} {
+		if c := capCheckmark(bad); c != "" {
+			t.Fatalf("capCheckmark(%q) = %q, want empty", bad, c)
+		}
+	}
+}
