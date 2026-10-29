@@ -218,8 +218,11 @@ const challengeTpl = `<!DOCTYPE html>
     --cap-font: var(--cp-font);
     --cap-checkbox-border: 1px solid color-mix(in srgb, var(--cp-text) 35%, transparent);
     --cap-checkbox-background: color-mix(in srgb, var(--cp-bg) 88%, white 5%);
-    --cap-spinner-color: var(--cp-text);
+    --cap-spinner-color: var(--cp-accent);
     --cap-spinner-background-color: color-mix(in srgb, var(--cp-bg) 85%, white 8%);
+    --cap-focus-ring: var(--cp-accent);
+    --cap-troubleshoot-color: var(--cp-accent);
+    {{if .CapCheckmark}}--cap-checkmark: {{.CapCheckmark}};{{end}}
   }
   @media (max-width: 380px) {
     main.verifyngo-card { padding: 1.5rem 1.25rem; border-radius: 10px; }
@@ -484,6 +487,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		"ProviderSwitcher":  switcher,
 		"WidgetTheme":       widgetTheme(cfg.Branding.BackgroundColor),
 		"AccentTextColor":   accentTextColor(cfg.Branding.AccentColor),
+		"CapCheckmark":      capCheckmark(cfg.Branding.AccentColor),
 		"Nonce":             nonce,
 		"SliderChallengeID": sliderID,
 		"SliderBg":          template.URL(sliderBg),
@@ -587,6 +591,14 @@ func accentTextColor(accentHex string) string {
 		return "#ffffff"
 	}
 	return "#000000"
+}
+
+func capCheckmark(accentHex string) template.CSS {
+	if _, ok := relativeLuminance(accentHex); !ok {
+		return ""
+	}
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><style>@keyframes anim{0%{stroke-dashoffset:23.21320343017578px}to{stroke-dashoffset:0}}</style><path fill="none" stroke="` + accentHex + `" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12 5 5L20 7" style="stroke-dashoffset:0;stroke-dasharray:23.21320343017578px;animation:anim .5s ease"/></svg>`
+	return template.CSS(`url("data:image/svg+xml,` + url.PathEscape(svg) + `")`)
 }
 
 func widgetTheme(bgHex string) string {
