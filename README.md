@@ -77,6 +77,10 @@ A request with a `browserMismatch` never gets the passive pass and goes straight
 
 Each network (/24 for IPv4, /48 for IPv6) can get at most `progressive.max_requests` new passive cookies per `progressive.request_window`. A client that drops its cookie to get a fresh budget is challenged once its network runs out.
 
+## Form submissions
+
+When a form POST is challenged, such as a SearXNG search, its fields are carried through the challenge. After it is solved, the browser sends the same POST again, automatically with JavaScript or with a Continue button without it. This covers same-origin `application/x-www-form-urlencoded` forms up to 16 KB. Cross-site POSTs, file uploads, and JSON bodies are not carried, and switching captcha provider drops the fields.
+
 ## Walk-aways and failed attempts
 
 Every challenge served counts as a walk-away, and `walkaway.threshold` walk-aways ban the client. A failed attempt shows the challenge again right away without counting a walk-away. Failed attempts have their own counter, and three times `walkaway.threshold` failures ban the client. Answers that look automated, like a slider solved too fast or the same answer repeated, still count as walk-aways. Solving a challenge clears both counters.

@@ -241,6 +241,7 @@ const challengeTpl = `<!DOCTYPE html>
   <div class="verifyngo-widget" role="group" aria-label="Captcha challenge">
   <input type="hidden" id="verifyngo-return-to" value="{{.ReturnTo}}">
   {{if eq .Provider "cap"}}
+  <div id="verifyngo-replay" hidden>{{template "replay" .}}</div>
   <cap-widget id="widget" data-cap-api-endpoint="{{.APIURL}}/{{.SiteKey}}/"></cap-widget>
   {{if .SliderSwitchURL}}<script nonce="{{.Nonce}}">
     (function(){
@@ -263,12 +264,14 @@ const challengeTpl = `<!DOCTYPE html>
       var r = document.createElement('input');
       r.type='hidden'; r.name='return_to'; r.value = rt ? rt.value : '/';
       f.appendChild(r);
+      f.appendChild(document.getElementById('verifyngo-replay'));
       document.body.appendChild(f); f.submit();
     });
   </script>
   {{else if eq .Provider "hcaptcha"}}
   <form id="hcaptcha-form" method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    {{template "replay" .}}
     <div id="hcaptcha-el"></div>
   </form>
   {{else if eq .Provider "slider"}}
@@ -339,6 +342,7 @@ const challengeTpl = `<!DOCTYPE html>
   <form id="slider-form" method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
     <input type="hidden" name="captcha_id" value="{{.SliderChallengeID}}">
+    {{template "replay" .}}
     <div class="verifyngo-slider">
       <img class="verifyngo-slider-img" src="{{.SliderBg}}" alt="Move the piece to the marked slot">
       <input type="range" class="verifyngo-range" name="answer" min="0" max="{{.SliderMax}}" step="1" value="0">
@@ -349,6 +353,7 @@ const challengeTpl = `<!DOCTYPE html>
   {{else}}
   <form method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    {{template "replay" .}}
     <div class="cf-turnstile" data-sitekey="{{.SiteKey}}" data-callback="onSolve" data-theme="{{.WidgetTheme}}"></div>
     <script nonce="{{.Nonce}}">function onSolve(token){
       var i=document.createElement('input'); i.type='hidden'; i.name='token'; i.value=token;
@@ -375,7 +380,8 @@ const challengeTpl = `<!DOCTYPE html>
   {{if eq .Provider "turnstile"}}<br>Protected by Cloudflare Turnstile · <a href="https://www.cloudflare.com/privacypolicy/">Privacy</a> · <a href="https://www.cloudflare.com/terms/">Terms</a>{{end}}
   {{if eq .Provider "hcaptcha"}}<br>Protected by hCaptcha · <a href="https://www.hcaptcha.com/privacy">Privacy</a> · <a href="https://www.hcaptcha.com/terms">Terms</a>{{end}}
 </footer>
-</body></html>`
+</body></html>
+{{define "replay"}}{{range .Replay}}<input type="hidden" name="__replay_{{.Name}}" value="{{.Value}}">{{end}}{{end}}`
 
 var tpl = template.Must(template.New("challenge").Parse(challengeTpl))
 
@@ -385,6 +391,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		log.Printf("challenge served id=%s ip=%s path=%s", id, ip, requestURI)
 	}
 
+	replay := replayFields(replayValues(r))
 	provider := providerForRequest(cfg, r)
 	metricChallenges.WithLabelValues(provider, "issued").Inc()
 
@@ -485,6 +492,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 		"RequestID":         id,
 		"ChallengeName":     provider,
 		"ReturnTo":          requestURI,
+		"Replay":            replay,
 		"ProviderSwitcher":  switcher,
 		"WidgetTheme":       widgetTheme(cfg.Branding.BackgroundColor),
 		"AccentTextColor":   accentTextColor(cfg.Branding.AccentColor),
