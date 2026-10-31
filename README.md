@@ -8,6 +8,18 @@ It is planned to add ALTCHA.
 
 If you set multiple providers, users can switch between them in case of an issue.
 
+## Slider fallback for Cap
+
+Cap's widget does not run in older browsers. When `provider` is `cap` and `slider.enabled` is set, these visitors get the JS-free slider instead:
+
+- **Old browsers:** Internet Explorer, the original Edge (EdgeHTML), Chrome before 84, Firefox before 90 and Safari before 15, detected by user agent. A visitor who picks Cap in the provider switcher keeps Cap.
+- **Missing browser features:** a small script on the Cap page switches to the slider once per session when the browser lacks custom elements, Shadow DOM or WebAssembly.
+- **No JavaScript:** the Cap page redirects to the slider after two seconds.
+
+Without `slider.enabled`, these visitors still get Cap.
+
+`branding.accent_color` (default `#4A90D9`) colors the submit button and provider switcher, and on the Cap widget the spinner, focus ring, troubleshooting link and checkmark. The checkmark only takes the color when it is a six-digit hex value such as `#E0218A`.
+
 ## Setting it up
 
 You will need to edit config.json: set upstream_url, cookie_secret, and a captcha provider. If you just want blanket protection, that is it. Just add in a few rules inside your JSON itself. However, for custom rule sets, you can use a TXT file or YAML policy file. 
