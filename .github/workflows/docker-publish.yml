@@ -6,9 +6,15 @@ on:
       - main
     tags:
       - "v*.*.*"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
 
 env:
   REGISTRY: ghcr.io
