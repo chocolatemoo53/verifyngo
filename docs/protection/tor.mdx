@@ -1,0 +1,48 @@
+---
+title: "Tor"
+description: "Onion services, exit nodes, and circuit IDs"
+---
+
+verifyngo recognizes two kinds of Tor traffic:
+
+- **Onion:** requests from an onion circuit address (see below), or with a `.onion` `Host` arriving from a loopback or private address
+- **Exit:** requests from an address on the Tor Project's exit list. Set `"tor": {"exit_list": true}` to fetch it, refreshed every `tor.refresh` (default `1h`)
+
+Tor traffic never gets the passive pass, is shown the JS-free slider by default (when `slider.enabled` is set), and is never checked against or reported to AbuseIPDB. Policy conditions can use `tor`, which is `"onion"`, `"exit"`, or `""`:
+
+```yaml
+  - name: no-tor-admin
+    conditions:
+      - 'tor != "" && path.startsWith("/admin")'
+    action: deny
+```
+
+Exit addresses are shared by many people, so they are never banned. Every request without a cookie gets a challenge instead, failed attempts are not counted against the address, and the slider allows five times as many attempts per minute. A bot behind an exit keeps getting challenges but never reaches the application.
+
+## Onion services with circuit IDs
+
+Without circuit IDs, every onion visitor arrives from the same address and is treated like an exit. With them, each circuit gets its own address, so walk-aways, failed attempts, and bans apply per circuit like any other visitor.
+
+In torrc, under the onion service:
+
+```
+HiddenServiceDir /var/lib/tor/verifyngo/
+HiddenServicePort 80 127.0.0.1:8081
+HiddenServiceExportCircuitID haproxy
+```
+
+Tor then opens every connection with a PROXY protocol header, so give the onion its own nginx port, separate from the clearnet one:
+
+```nginx
+server {
+    listen 127.0.0.1:8081 proxy_protocol;
+    server_name youronionaddress.onion;
+
+    location / {
+        proxy_set_header X-Forwarded-For $proxy_protocol_addr;
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+```
+
+Both nginx ports proxy to the same verifyngo `listen_addr`. Set `trust_real_ip` to `true` and list nginx in `trusted_proxies`.

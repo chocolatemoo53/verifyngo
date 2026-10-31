@@ -1,0 +1,16 @@
+---
+title: "Plain rule text file"
+description: "Allow, challenge, deny, or tarpit with one rule per line"
+---
+
+TXT files allow for `allow | challenge | deny | tarpit` actions, one rule per line:
+
+```
+allow     path   ^/api/
+deny      ua     python-requests|curl/|Go-http-client
+deny      cidr   185.220.0.0/16
+challenge path   ^/search
+tarpit    ua    (ClaudeBot|GPTBot|PerplexityBot)
+```
+
+See `rules.txt.example`

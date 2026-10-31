@@ -1,0 +1,6 @@
+---
+title: "Walk-aways and failed attempts"
+description: "How unsolved challenges and failures lead to bans"
+---
+
+Every challenge served counts as a walk-away, and `walkaway.threshold` walk-aways ban the client. A failed attempt shows the challenge again right away without counting a walk-away. Failed attempts have their own counter, and three times `walkaway.threshold` failures ban the client. Answers that look automated, like a slider solved too fast or the same answer repeated, still count as walk-aways. Solving a challenge clears both counters.

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "verifyngo",
+  "theme": "almond",
+  "colors": {
+    "primary": "#5267A5",
+    "light": "#EFF6FF",
+    "dark": "#1E40AF"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/chocolatemoo53/verifyngo"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "introduction"
+            ]
+          },
+          {
+            "group": "Rules",
+            "pages": [
+              "rules/text-rules",
+              "rules/policy",
+              "rules/asns"
+            ]
+          },
+          {
+            "group": "Protection",
+            "pages": [
+              "protection/bypass-paths",
+              "protection/progressive",
+              "protection/form-submissions",
+              "protection/walk-aways",
+              "protection/cookies",
+              "protection/tls-fingerprinting",
+              "protection/tor"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/persistence",
+              "operations/metrics"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "fonts": {
+    "family": "Outfit",
+    "heading": {
+      "family": "Instrument Serif",
+      "weight": 900
+    }
+  },
+  "icons": {
+    "library": "tabler"
+  },
+  "thumbnails": {
+    "fonts": {
+      "family": "Outfit"
+    },
+    "eyebrow": {
+      "color": "#5267A5"
+    }
+  },
+  "footer": {
+    "socials": {
+      "bluesky": "https://bsky.app/profile/chocolatemoo53.com",
+      "github": "https://github.com/chocolatemoo53"
+    }
+  },
+  "background": {
+    "decoration": "gradient",
+    "color": {
+      "light": "#E9ECF3",
+      "dark": "#0F0F0F"
+    }
+  },
+  "logo": {
+    "light": "/images/verifyngo.svg",
+    "dark": "/images/verifyngo.svg"
+  },
+  "favicon": {
+    "light": "/images/verifyngo.svg",
+    "dark": "/images/verifyngo.svg"
+  }
+}

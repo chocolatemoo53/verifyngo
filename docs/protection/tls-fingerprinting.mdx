@@ -1,0 +1,33 @@
+---
+title: "TLS fingerprinting"
+description: "JA4 and TLSFP from the TLS ClientHello"
+---
+
+With OpenResty 1.29.2.1 or newer, `lua/ja4_fingerprint.lua` computes two fingerprints from the TLS ClientHello and passes them to verifyngo as headers:
+
+- `X-JA4`: [JA4](https://github.com/FoxIO-LLC/ja4)
+- `X-TLSFP`: [TLSFP](https://github.com/ntop/nDPI/blob/dev/fingerprint/nDPI_TLS_Fingerprint.md), which leaves out extensions that change between new and resumed connections, so one browser keeps one value
+
+```nginx
+lua_package_path "/path/to/lua/?.lua;;";
+
+server {
+    listen 443 ssl;
+
+    ssl_client_hello_by_lua_block {
+        require("ja4_fingerprint").compute()
+    }
+
+    access_by_lua_block {
+        require("ja4_fingerprint").set_headers()
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+```
+
+`set_headers()` always overwrites both headers, so a client cannot send its own. In config.json, set `trust_fingerprint_headers` to `true` and list the proxy in `trusted_proxies`. verifyngo ignores the headers otherwise. Only enable it when every request passes through this module.
+
+verifyngo prefers TLSFP and falls back to JA4. Walk-aways are counted per fingerprint within the client's /24 (IPv4) or /48 (IPv6), and the count resets when a challenge is solved. This catches a bot rotating addresses inside one network without banning everyone who uses the same browser.

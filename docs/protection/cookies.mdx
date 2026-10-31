@@ -1,0 +1,6 @@
+---
+title: "Cookies"
+description: "How verified cookies are bound to the browser"
+---
+
+The verified and passive cookies are signed together with the browser's `User-Agent` and `Accept-Language`. A cookie copied to another client, or kept after the browser's user agent or language changes, stops working and that client is challenged again. When TLS fingerprinting is enabled, they are also bound to the client's cipher list, the part of JA4 that stays the same across resumed connections. A cookie copied from a browser into a script fails even if the script fakes the user agent. A request without a fingerprint header is checked against the user agent and language only, so a connection the proxy cannot fingerprint is not challenged in a loop. Cookies issued before this change are no longer accepted, so every visitor solves one new challenge after upgrading.

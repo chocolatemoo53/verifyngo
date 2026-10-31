@@ -1,0 +1,16 @@
+---
+title: "Persistence"
+description: "Storage, hot reload, startup, and Redis outages"
+---
+
+Persistence is controlled by the `store` configuration. You can store walkaway counters, blocklist, and reports in memory or Redis.
+
+With Docker, mount `/data` to a volume and set `store.file.path` to `/data/store.json`.
+
+Rules/policy files are hot-reloaded. Parse errors keep the last good rules in memory.
+
+Rules load in the background at startup, so fetching network lists or ASN prefixes does not hold up the site. Until they are loaded, requests skip the rules and pass through. Bans, the blocklist, and cookies still apply. If the rules fail to load at startup, `default_action` applies to every request until the file is fixed.
+
+If Redis is unreachable, the ban check is skipped instead of blocking everyone, and clients without a cookie are still challenged.
+
+Files in `static_dir` are served under `/__static/`, so they never shadow the upstream application's own `/static/` path.

@@ -1,0 +1,14 @@
+---
+title: "Progressive mode"
+description: "Trust first, challenge once the budget runs out"
+---
+
+CAPTCHAs are inherently annoying, so passive mode initially trusts everyone instead of challenging on first sight. When `progressive.enabled = true`, requests to `progressive.passive_paths` (the handful of page/document routes you care about) are served pass-through and get a short-lived passive cookie (`progressive.passive_ttl`).
+
+The first `progressive.max_requests` requests for that cookie within `progressive.request_window` are served without a challenge. Once the budget is used up, the next request escalates to a real CAPTCHA. Solving it issues the long-lived verified cookie, so the user stops getting challenged.
+
+Only paths in `progressive.passive_paths` count against the budget. Static assets and browser plumbing are matched by `bypass_paths` before passive mode runs. For a dynamic site with many changing parts, keep `passive_paths` to the few real navigation routes (e.g. `^/$`).
+
+A request with a `browserMismatch` never gets the passive pass and goes straight to a challenge.
+
+Each network (/24 for IPv4, /48 for IPv6) can get at most `progressive.max_requests` new passive cookies per `progressive.request_window`. A client that drops its cookie to get a fresh budget is challenged once its network runs out.

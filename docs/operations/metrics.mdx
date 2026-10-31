@@ -1,0 +1,31 @@
+---
+title: "Metrics"
+description: "Prometheus metrics and what each one means"
+---
+
+Set `metrics_addr` (for example `"127.0.0.1:9100"`) to serve Prometheus metrics at `/metrics` on a separate listener. It is off when empty. The endpoint has no authentication, so bind it to localhost or a private network, never to the public interface. In Docker, bind `0.0.0.0:9100` and only publish it on the network Prometheus uses.
+
+```yaml
+scrape_configs:
+  - job_name: verifyngo
+    static_configs:
+      - targets: ["verifyngo:9100"]
+```
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `verifyngo_decisions_total` | `decision` | Every request and how it was handled |
+| `verifyngo_rule_hits_total` | `rule`, `action` | Requests decided by each rule; `default` when none matched |
+| `verifyngo_challenges_total` | `provider`, `result` | Challenges `issued`, and verify attempts `passed`, `failed`, `automated`, `throttled`, or `error` |
+| `verifyngo_bans_total` | `reason` | Bans by `walk-aways`, `failed attempts`, or `fingerprint` |
+| `verifyngo_passive_total` | `result` | Progressive mode outcomes |
+| `verifyngo_browser_mismatch_total` | `kind` | User agents that do not match their headers |
+| `verifyngo_upstream_responses_total` | `status` | Upstream responses by status class, or `error` |
+| `verifyngo_store_errors_total` | `op` | Failed Redis operations |
+| `verifyngo_rule_reloads_total` | `result` | Rule loads and reloads |
+| `verifyngo_rules_loaded` | | `0` while rules are loading at startup, then `1` |
+| `verifyngo_blocklist_entries` | | Entries in the AbuseIPDB blocklist |
+| `verifyngo_tor_requests_total` | `kind` | Requests over Tor, `onion` or `exit` |
+| `verifyngo_tor_exits` | | Addresses in the Tor exit list |
+
+Go runtime and process metrics (`go_*`, `process_*`) are included. Policy rules are labeled by their `name`, and unnamed rules as `rule-N` by position.

@@ -1,0 +1,12 @@
+---
+title: "Browser plumbing"
+description: "Paths that always pass straight to the upstream"
+---
+
+Browsers automatically fire requests for favicons or other similar things. 
+
+By default, these are bypassed:
+
+`favicon.ico`, `robots.txt`, `sitemap.xml`, `/.well-known/*`, `manifest.json`/`site.webmanifest`/`*.webmanifest`, `browserconfig.xml`, `apple-touch-icon*.png` and (`.css`, `.js`, `.mjs`, images, fonts, `.wasm`, etc.)
+
+`bypass_paths` always proxies them straight to your upstream. They never count towards the walk-away, ban, or passive budgets. Static assets are bypassed by default because a browser fetches them to render a page rather than navigating to them directly. If `bypass_paths` is omitted from config.json, it defaults to the built-in list above. Still, you can set `"bypass_paths": []` to disable this behavior entirely, or provide your own list of regexes to override the defaults.

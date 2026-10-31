@@ -1,0 +1,24 @@
+---
+title: "Policy file"
+description: "Networks, named conditions, and ordered rules in YAML"
+---
+
+Set `policy_file` to a YAML policy which supports:
+
+- `networks` entries with `asn`, `cidr`, `prefixes`, `url`, or `file`
+- optional `jq-path` or `regex` extraction for URL/file sources
+- `conditions` with named reusable groups (`($name)` references)
+- `rules` with ordered, first-match-wins behavior
+
+`policy_file` takes priority over `rules_file` and inline `rules`
+
+`.matches()` takes a quoted regular expression, which is compiled when the policy loads. An invalid pattern stops the policy from loading instead of silently never matching.
+
+Conditions can use `path`, `userAgent`, `method`, `ip`, `headers["Name"]` and `browserMismatch`. `browserMismatch` is `"fake"` when the user agent claims Firefox or Safari but sends Chromium client hints, `"no-hints"` when it claims Chromium but sends no client hints over HTTPS, and `""` otherwise:
+
+```yaml
+  - name: fake-browser
+    conditions:
+      - 'browserMismatch == "fake"'
+    action: challenge
+```
