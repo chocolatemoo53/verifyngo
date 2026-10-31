@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -186,5 +187,22 @@ func TestCapUnsupported(t *testing.T) {
 		if got := capUnsupported(ua); got != want {
 			t.Errorf("capUnsupported(%q) = %v, want %v", ua, got, want)
 		}
+	}
+}
+
+func TestNoScriptFallsBackToSlider(t *testing.T) {
+	cfg := &Config{Provider: "cap"}
+	cfg.Slider.Enabled = true
+	req := httptest.NewRequest("GET", "/watch?v=a&b=c", nil)
+	rec := httptest.NewRecorder()
+	serveChallenge(rec, req, cfg, "https://cap.example", "203.0.113.9", "/watch?v=a&b=c", false)
+	body := rec.Body.String()
+	want := `<noscript><meta http-equiv="refresh" content="2;url=/__set_provider?provider=slider&amp;return_to=%2Fwatch%3Fv%3Da%26b%3Dc"></noscript>`
+	if !strings.Contains(body, want) {
+		i := strings.Index(body, "<noscript>")
+		if i < 0 {
+			t.Fatalf("no noscript fallback in challenge page")
+		}
+		t.Fatalf("noscript fallback = %q", body[i:i+160])
 	}
 }
