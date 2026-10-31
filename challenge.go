@@ -29,6 +29,7 @@ const challengeTpl = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
+{{if .SliderSwitchURL}}<noscript><meta http-equiv="refresh" content="2;url={{.SliderSwitchURL}}"></noscript>{{end}}
 {{if .Nonce}}
 <script nonce="{{.Nonce}}">
   window.CAP_CSS_NONCE = '{{.Nonce}}';
