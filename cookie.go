@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,7 +35,9 @@ func cookieBinding(r *http.Request) string {
 
 func cookieMAC(secret, payload, binding string) []byte {
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(payload + "\n" + binding))
+	io.WriteString(mac, payload)
+	io.WriteString(mac, "\n")
+	io.WriteString(mac, binding)
 	return mac.Sum(nil)
 }
 
@@ -44,27 +47,33 @@ func signCookie(secret string, expiry time.Time, scope, tls, binding string) str
 }
 
 func verifyCookie(secret, value, expectedScope, tls, binding string) bool {
-	parts := strings.Split(value, ".")
-	if len(parts) != 4 || parts[1] != expectedScope {
+	if strings.Count(value, ".") != 3 {
 		return false
 	}
-	if parts[2] != "" && tls != "" && parts[2] != tls {
+	expiry, rest, _ := strings.Cut(value, ".")
+	scope, rest, _ := strings.Cut(rest, ".")
+	tlsPart, hexSig, _ := strings.Cut(rest, ".")
+	if scope != expectedScope {
 		return false
 	}
-
-	sig, err := hex.DecodeString(parts[3])
-	if err != nil {
-		return false
-	}
-	if !hmac.Equal(cookieMAC(secret, strings.Join(parts[:3], "."), binding), sig) {
+	if tlsPart != "" && tls != "" && tlsPart != tls {
 		return false
 	}
 
-	expUnix, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
+	expUnix, err := strconv.ParseInt(expiry, 10, 64)
+	if err != nil || !time.Now().Before(time.Unix(expUnix, 0)) {
 		return false
 	}
-	return time.Now().Before(time.Unix(expUnix, 0))
+
+	var sig [sha256.Size]byte
+	if len(hexSig) != hex.EncodedLen(len(sig)) {
+		return false
+	}
+	if _, err := hex.Decode(sig[:], []byte(hexSig)); err != nil {
+		return false
+	}
+	payload := value[:len(value)-len(hexSig)-1]
+	return hmac.Equal(cookieMAC(secret, payload, binding), sig[:])
 }
 
 func tlsCipherHash(r *http.Request, cfg *Config) string {
@@ -153,6 +162,9 @@ func clearPassiveCookie(w http.ResponseWriter, r *http.Request, cfg *Config) {
 }
 
 func hasValidCookie(r *http.Request, cfg *Config) bool {
+	if r.Header.Get("Cookie") == "" {
+		return false
+	}
 	c, err := r.Cookie(cfg.CookieName)
 	if err != nil {
 		return false

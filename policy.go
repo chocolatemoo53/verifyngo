@@ -469,20 +469,21 @@ func (n policyNetworkEntry) FetchPrefixes(c *http.Client) (output []net.IPNet, e
 }
 
 func parseCIDROrIP(value string) (net.IPNet, error) {
-	_, ipNet, err := net.ParseCIDR(value)
-	if err != nil {
-		ip := net.ParseIP(value)
-		if ip == nil {
-			return net.IPNet{}, fmt.Errorf("failed to parse CIDR: %s", err)
+	if strings.IndexByte(value, '/') != -1 {
+		_, ipNet, err := net.ParseCIDR(value)
+		if err != nil {
+			return net.IPNet{}, err
 		}
-		if ip4 := ip.To4(); ip4 != nil {
-			return net.IPNet{IP: ip4, Mask: net.CIDRMask(len(ip4)*8, len(ip4)*8)}, nil
-		}
-		return net.IPNet{IP: ip, Mask: net.CIDRMask(len(ip)*8, len(ip)*8)}, nil
-	} else if ipNet != nil {
 		return *ipNet, nil
 	}
-	return net.IPNet{}, errors.New("invalid CIDR")
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return net.IPNet{}, fmt.Errorf("failed to parse IP: %s", value)
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return net.IPNet{IP: ip4, Mask: net.CIDRMask(len(ip4)*8, len(ip4)*8)}, nil
+	}
+	return net.IPNet{IP: ip, Mask: net.CIDRMask(len(ip)*8, len(ip)*8)}, nil
 }
 
 func (c compiledCondition) evalParams(params map[string]interface{}) bool {

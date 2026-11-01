@@ -3,6 +3,7 @@ package providers
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,7 +16,21 @@ type Verifier interface {
 	WidgetScriptURL() string
 }
 
-var httpClient = &http.Client{Timeout: 8 * time.Second}
+var httpClient = &http.Client{
+	Timeout: 8 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 5 * time.Second,
+	},
+}
 
 type Cap struct {
 	APIURL    string

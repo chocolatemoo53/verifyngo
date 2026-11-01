@@ -12,9 +12,49 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type copyBufferPool struct {
+	pool sync.Pool
+}
+
+func newBufferPool() *copyBufferPool {
+	return &copyBufferPool{
+		pool: sync.Pool{
+			New: func() any {
+				return make([]byte, 32*1024)
+			},
+		},
+	}
+}
+
+func (p *copyBufferPool) Get() []byte {
+	return p.pool.Get().([]byte)
+}
+
+func (p *copyBufferPool) Put(b []byte) {
+	p.pool.Put(b)
+}
+
+func statusClass(code int) string {
+	switch code / 100 {
+	case 1:
+		return "1xx"
+	case 2:
+		return "2xx"
+	case 3:
+		return "3xx"
+	case 4:
+		return "4xx"
+	case 5:
+		return "5xx"
+	default:
+		return strconv.Itoa(code/100) + "xx"
+	}
+}
 
 func watchRulesSource(cfg *Config, box *atomic.Value) {
 	source := cfg.PolicyFile
@@ -188,6 +228,7 @@ func pathMatchesAny(path string, patterns []*regexp.Regexp) bool {
 }
 
 var defaultBypassPaths = []string{
+	`\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot|wasm|mp4|webm)$`,
 	`^/favicon\.ico$`,
 	`^/robots\.txt$`,
 	`^/sitemap\.xml$`,
@@ -196,7 +237,6 @@ var defaultBypassPaths = []string{
 	`\.webmanifest$`,
 	`^/browserconfig\.xml$`,
 	`^/apple-touch-icon(?:-precomposed)?(?:-\d+x\d+)?\.png$`,
-	`\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot|wasm|mp4|webm)$`,
 }
 
 func main() {
@@ -255,9 +295,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("upstream_url: %v", err)
 	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          1000,
+		MaxIdleConnsPerHost:   200,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
+	proxy.Transport = transport
+	proxy.BufferPool = newBufferPool()
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		metricUpstream.WithLabelValues(strconv.Itoa(resp.StatusCode/100) + "xx").Inc()
+		metricUpstream.WithLabelValues(statusClass(resp.StatusCode)).Inc()
 		resp.Header.Set("X-Content-Type-Options", "nosniff")
 		resp.Header.Set("X-Frame-Options", "DENY")
 		resp.Header.Set("Referrer-Policy", "no-referrer")
@@ -351,12 +406,6 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return "bad_request"
 	}
-	ipStr := ip.String()
-	tor := torKind(r, cfg, ip)
-	shared := sharedTorIP(tor, ip)
-	if tor != "" {
-		metricTor.WithLabelValues(tor).Inc()
-	}
 
 	if ipAllowlisted(cfg, ip) {
 		proxy.ServeHTTP(w, r)
@@ -376,6 +425,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	if pathMatchesAny(r.URL.Path, bypassPaths) {
 		proxy.ServeHTTP(w, r)
 		return "bypass"
+	}
+
+	ipStr := ip.String()
+	tor := torKind(r, cfg, ip)
+	shared := sharedTorIP(tor, ip)
+	if tor != "" {
+		metricTor.WithLabelValues(tor).Inc()
 	}
 
 	if !shared && store.IsBlocked(ipStr) {

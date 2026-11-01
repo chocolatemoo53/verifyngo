@@ -157,13 +157,15 @@ func (s *sliderChallengeStore) issue(answer int) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	for k, v := range s.challenges {
-		if now.After(v.expires) {
-			delete(s.challenges, k)
-		}
-	}
 	if len(s.challenges) >= s.max {
-		return "", errors.New("slider: too many pending challenges")
+		for k, v := range s.challenges {
+			if now.After(v.expires) {
+				delete(s.challenges, k)
+			}
+		}
+		if len(s.challenges) >= s.max {
+			return "", errors.New("slider: too many pending challenges")
+		}
 	}
 	s.challenges[id] = sliderChallenge{answer: answer, expires: now.Add(s.ttl), issued: now}
 	return id, nil

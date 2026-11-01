@@ -701,3 +701,23 @@ func TestSearchPostSurvivesChallenge(t *testing.T) {
 		t.Errorf("resubmitted search: decision %q, upstream got %q", res.Header().Get("X-Test-Decision"), res.Body.String())
 	}
 }
+
+func TestVerifyCookieRejectsTampering(t *testing.T) {
+	secret := "0123456789abcdef0123456789abcdef"
+	binding := "Mozilla/5.0 Chrome/141.0.0.0\nen-US"
+	value := signCookie(secret, time.Now().Add(time.Hour), cookieScopeFull, "", binding)
+	dot := strings.IndexByte(value, '.')
+	sig := value[strings.LastIndexByte(value, '.')+1:]
+	cases := map[string]string{
+		"later expiry":  strconv.FormatInt(time.Now().Add(48*time.Hour).Unix(), 10) + value[dot:],
+		"bad hex":       value[:len(value)-1] + "z",
+		"short sig":     value[:len(value)-2],
+		"extra segment": value + ".00",
+		"sig only":      sig,
+	}
+	for name, v := range cases {
+		if verifyCookie(secret, v, cookieScopeFull, "", binding) {
+			t.Errorf("%s: tampered cookie verified", name)
+		}
+	}
+}

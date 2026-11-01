@@ -303,7 +303,7 @@ func (s *memoryStore) persistSnapshot() {
 		snap.BanCounts[ip] = e.Count
 	}
 	for ip, paths := range s.recentPath {
-		snap.RecentPath[ip] = paths
+		snap.RecentPath[ip] = append([]string(nil), paths...)
 	}
 	s.dirty = false
 	s.mu.Unlock()
@@ -350,16 +350,24 @@ func newRedisStore(cfg *Config) *redisStore {
 	return s
 }
 
+const redisOpTimeout = 250 * time.Millisecond
+
+func (s *redisStore) opCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(s.ctx, redisOpTimeout)
+}
+
 func (s *redisStore) k(kind, ip string) string {
 	return s.pfx + ":" + kind + ":" + ip
 }
 
 func (s *redisStore) IncrWalkaway(ip string, ttl time.Duration) int {
+	ctx, cancel := s.opCtx()
+	defer cancel()
 	key := s.k("walkaway", ip)
 	pipe := s.rdb.TxPipeline()
-	incr := pipe.Incr(s.ctx, key)
-	pipe.Expire(s.ctx, key, ttl)
-	_, err := pipe.Exec(s.ctx)
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		storeError("incr walkaway", err)
 		return 0
@@ -368,19 +376,25 @@ func (s *redisStore) IncrWalkaway(ip string, ttl time.Duration) int {
 }
 
 func (s *redisStore) ResetWalkaway(ip string) {
-	if err := s.rdb.Del(s.ctx, s.k("walkaway", ip)).Err(); err != nil {
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	if err := s.rdb.Del(ctx, s.k("walkaway", ip)).Err(); err != nil {
 		storeError("reset walkaway", err)
 	}
 }
 
 func (s *redisStore) Block(ip string, dur time.Duration) {
-	if err := s.rdb.Set(s.ctx, s.k("blocked", ip), "1", dur).Err(); err != nil {
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	if err := s.rdb.Set(ctx, s.k("blocked", ip), "1", dur).Err(); err != nil {
 		storeError("block", err)
 	}
 }
 
 func (s *redisStore) IsBlocked(ip string) bool {
-	ok, err := s.rdb.Exists(s.ctx, s.k("blocked", ip)).Result()
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	ok, err := s.rdb.Exists(ctx, s.k("blocked", ip)).Result()
 	if err != nil {
 		storeError("blocked check", err)
 		return false
@@ -389,7 +403,9 @@ func (s *redisStore) IsBlocked(ip string) bool {
 }
 
 func (s *redisStore) ShouldReport(ip string, cooldown time.Duration) bool {
-	ok, err := s.rdb.SetNX(s.ctx, s.k("reported", ip), "1", cooldown).Result()
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	ok, err := s.rdb.SetNX(ctx, s.k("reported", ip), "1", cooldown).Result()
 	if err != nil {
 		storeError("report cooldown", err)
 		return false
@@ -398,14 +414,16 @@ func (s *redisStore) ShouldReport(ip string, cooldown time.Duration) bool {
 }
 
 func (s *redisStore) IncrBanCount(ip string) int {
+	ctx, cancel := s.opCtx()
+	defer cancel()
 	key := s.k("bancount", ip)
-	n, err := s.rdb.Incr(s.ctx, key).Result()
+	n, err := s.rdb.Incr(ctx, key).Result()
 	if err != nil {
 		storeError("incr ban count", err)
 		return 0
 	}
 	if n == 1 {
-		if err := s.rdb.Expire(s.ctx, key, 30*24*time.Hour).Err(); err != nil {
+		if err := s.rdb.Expire(ctx, key, 30*24*time.Hour).Err(); err != nil {
 			storeError("expire ban count", err)
 		}
 	}
@@ -413,18 +431,22 @@ func (s *redisStore) IncrBanCount(ip string) int {
 }
 
 func (s *redisStore) LogPath(ip, path string) {
+	ctx, cancel := s.opCtx()
+	defer cancel()
 	key := s.k("paths", ip)
 	pipe := s.rdb.TxPipeline()
-	pipe.RPush(s.ctx, key, path)
-	pipe.LTrim(s.ctx, key, int64(-maxRecentPaths), -1)
-	pipe.Expire(s.ctx, key, 7*24*time.Hour)
-	if _, err := pipe.Exec(s.ctx); err != nil {
+	pipe.RPush(ctx, key, path)
+	pipe.LTrim(ctx, key, int64(-maxRecentPaths), -1)
+	pipe.Expire(ctx, key, 7*24*time.Hour)
+	if _, err := pipe.Exec(ctx); err != nil {
 		storeError("log path", err)
 	}
 }
 
 func (s *redisStore) RecentPaths(ip string) []string {
-	out, err := s.rdb.LRange(s.ctx, s.k("paths", ip), 0, -1).Result()
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	out, err := s.rdb.LRange(ctx, s.k("paths", ip), 0, -1).Result()
 	if err != nil {
 		storeError("recent paths", err)
 		return nil
@@ -433,11 +455,13 @@ func (s *redisStore) RecentPaths(ip string) []string {
 }
 
 func (s *redisStore) IncrPassiveCount(cookie string, window time.Duration) int {
+	ctx, cancel := s.opCtx()
+	defer cancel()
 	key := s.k("passive", cookie)
 	pipe := s.rdb.TxPipeline()
-	incr := pipe.Incr(s.ctx, key)
-	pipe.Expire(s.ctx, key, window)
-	_, err := pipe.Exec(s.ctx)
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, window)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		storeError("incr passive count", err)
 		return 0
