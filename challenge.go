@@ -34,6 +34,11 @@ const challengeTpl = `<!DOCTYPE html>
 <script nonce="{{.Nonce}}">
   window.CAP_CSS_NONCE = '{{.Nonce}}';
   window.CAP_SCRIPT_NONCE = window.CAP_CSS_NONCE;
+{{- if .CapAssetsURL}}
+  window.CAP_CUSTOM_WASM_URL = '{{.CapAssetsURL}}/cap_wasm_bg.wasm';
+  window.CAP_CUSTOM_HASHWX_URL = '{{.CapAssetsURL}}/hashwx.wasm';
+  window.CAP_PAKO_URL = '{{.CapAssetsURL}}/pako_inflate.min.js';
+{{- end}}
 </script>
 {{end}}
 {{if .ScriptURL}}<script src="{{.ScriptURL}}" async defer nonce="{{.Nonce}}"></script>{{end}}
@@ -476,6 +481,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	_ = tpl.Execute(w, map[string]interface{}{
 		"Provider":          provider,
 		"ScriptURL":         scriptURL,
+		"CapAssetsURL":      cfg.Cap.AssetsURL,
 		"APIURL":            apiURL,
 		"SiteKey":           siteKeyForRequest(cfg, r),
 		"LogoURL":           cfg.Branding.LogoURL,

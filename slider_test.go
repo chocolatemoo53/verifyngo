@@ -206,3 +206,17 @@ func TestNoScriptFallsBackToSlider(t *testing.T) {
 		t.Fatalf("noscript fallback = %q", body[i:i+160])
 	}
 }
+
+func TestCapAssetsURL(t *testing.T) {
+	cfg := &Config{Provider: "cap"}
+	cfg.Cap.AssetsURL = "/__static/cap"
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	serveChallenge(rec, req, cfg, "https://cap.example", "203.0.113.9", "/", false)
+	body := rec.Body.String()
+	for _, file := range []string{"cap_wasm_bg.wasm", "hashwx.wasm", "pako_inflate.min.js"} {
+		if !strings.Contains(body, `\/__static\/cap/`+file) && !strings.Contains(body, `/__static/cap/`+file) {
+			t.Fatalf("challenge page does not point the widget at %s", file)
+		}
+	}
+}

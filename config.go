@@ -52,6 +52,7 @@ type Config struct {
 		SiteKey         string `json:"site_key"`
 		SecretKey       string `json:"secret_key"`
 		WidgetScriptURL string `json:"widget_script_url"`
+		AssetsURL       string `json:"assets_url"`
 		UseNonce        bool   `json:"use_nonce"`
 		CSP             string `json:"csp"`
 	} `json:"cap"`

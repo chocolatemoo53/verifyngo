@@ -13,6 +13,7 @@
     "site_key": "your-cap-site-key",
     "secret_key": "your-cap-secret-key",
     "widget_script_url": "",
+    "assets_url": "",
     "use_nonce": false,
     "csp": ""
   },
