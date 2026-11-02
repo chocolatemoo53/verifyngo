@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/hmac"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -152,12 +156,20 @@ func fingerprintKey(r *http.Request, cfg *Config, ip net.IP) (string, string, bo
 
 const (
 	failedAttemptFactor = 3
+	timedWait           = 15 * time.Second
+	switchAllowance     = 20
+	switchCookie        = "cp_switched"
+	troubleDelay        = time.Minute
+	troubleTokenMaxAge  = time.Hour
+	troubleAttempts     = 3
 	torAttemptFactor    = 5
 )
 
 func resetWalkaways(store Store, r *http.Request, cfg *Config, ip net.IP) {
 	store.ResetWalkaway(ip.String())
 	store.ResetWalkaway("fail:" + ip.String())
+	store.ResetWalkaway("load:" + ip.String())
+	store.ResetWalkaway("switch:" + ip.String())
 	if key, _, ok := fingerprintKey(r, cfg, ip); ok {
 		store.ResetWalkaway(key)
 	}
@@ -319,6 +331,24 @@ func main() {
 		if cfg.ResponseCSP != "" && resp.Header.Get("Content-Security-Policy") == "" {
 			resp.Header.Set("Content-Security-Policy", cfg.ResponseCSP)
 		}
+		ct := resp.Header.Get("Content-Type")
+		ce := resp.Header.Get("Content-Encoding")
+		if ce == "" && strings.HasPrefix(ct, "text/html") && resp.StatusCode == http.StatusOK && resp.ContentLength < 1<<20 {
+			body, err := io.ReadAll(resp.Body)
+			if err == nil {
+				_ = resp.Body.Close()
+				bodyStr := string(body)
+				trap := trapHTML
+				if idx := strings.LastIndex(strings.ToLower(bodyStr), "</body>"); idx >= 0 {
+					bodyStr = bodyStr[:idx] + trap + bodyStr[idx:]
+				} else {
+					bodyStr += trap
+				}
+				resp.Body = io.NopCloser(strings.NewReader(bodyStr))
+				resp.ContentLength = int64(len(bodyStr))
+				resp.Header.Set("Content-Length", strconv.Itoa(len(bodyStr)))
+			}
+		}
 		return nil
 	}
 
@@ -337,10 +367,21 @@ func main() {
 		go startTorExitFetcher(cfg)
 	}
 
+	cfg.store = store
+
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/__cp_trap", func(w http.ResponseWriter, r *http.Request) {
+		ip, _ := clientIP(r, cfg)
+		handleTrap(w, r, cfg, store, ip)
+	})
 
 	mux.HandleFunc("/__verify", func(w http.ResponseWriter, r *http.Request) {
 		handleVerify(w, r, cfg, store)
+	})
+
+	mux.HandleFunc("/__wait", func(w http.ResponseWriter, r *http.Request) {
+		handleWait(w, r, cfg, store)
 	})
 
 	mux.HandleFunc("/__set_provider", func(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +408,7 @@ func main() {
 			p,
 			expiry,
 		))
+		http.SetCookie(w, newCookie(r, cfg, switchCookie, "1", time.Now().Add(30*time.Second)))
 		http.Redirect(w, r, returnTo, http.StatusFound)
 	})
 
@@ -400,6 +442,55 @@ func withoutDeadlines(next http.Handler) http.Handler {
 	})
 }
 
+func handleTrap(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP) {
+	if r.Header.Get("Sec-Fetch-Site") != "" {
+		http.NotFound(w, r)
+		return
+	}
+	if ip != nil {
+		log.Printf("rogue scraper trapped ip=%s path=%s", logIP(cfg, ip), r.URL.Path)
+		store.Block(ip.String(), 24*time.Hour)
+		metricRuleHits.WithLabelValues("css_trap", "ban").Inc()
+	}
+	clearPassiveCookie(w, r, cfg)
+	http.Error(w, "forbidden", http.StatusForbidden)
+}
+
+func cleanPathForMatch(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	if strings.IndexByte(p, ';') == -1 {
+		return p
+	}
+	var sb strings.Builder
+	sb.Grow(len(p))
+	for {
+		segEnd := strings.IndexByte(p, '/')
+		seg := p
+		if segEnd >= 0 {
+			seg = p[:segEnd]
+		}
+		if semi := strings.IndexByte(seg, ';'); semi >= 0 {
+			seg = seg[:semi]
+		}
+		sb.WriteString(seg)
+		if segEnd < 0 {
+			break
+		}
+		sb.WriteByte('/')
+		p = p[segEnd+1:]
+	}
+	res := sb.String()
+	if res == "" {
+		return "/"
+	}
+	return res
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []compiledRule, loaded bool, passivePaths []*regexp.Regexp, bypassPaths []*regexp.Regexp, alwaysPassPaths []*regexp.Regexp, store Store, blacklist *atomic.Value, proxy http.Handler) string {
 	ip, resolved := clientIP(r, cfg)
 	if ip == nil {
@@ -407,24 +498,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		return "bad_request"
 	}
 
+	cleanPath := cleanPathForMatch(r.URL.Path)
+
+	if cleanPath == "/__cp_trap" {
+		handleTrap(w, r, cfg, store, ip)
+		return "trap"
+	}
+
 	if ipAllowlisted(cfg, ip) {
 		proxy.ServeHTTP(w, r)
 		return "allowlisted"
 	}
 
-	if pathMatchesAny(r.URL.Path, alwaysPassPaths) {
+	if pathMatchesAny(cleanPath, alwaysPassPaths) {
 		proxy.ServeHTTP(w, r)
 		return "always_pass"
-	}
-
-	if hasValidCookie(r, cfg) {
-		proxy.ServeHTTP(w, r)
-		return "verified"
-	}
-
-	if pathMatchesAny(r.URL.Path, bypassPaths) {
-		proxy.ServeHTTP(w, r)
-		return "bypass"
 	}
 
 	ipStr := ip.String()
@@ -435,7 +523,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	}
 
 	if !shared && store.IsBlocked(ipStr) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		serveBannedPage(w, r, cfg)
 		return "banned"
 	}
 
@@ -447,22 +535,35 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 		}
 	}
 
+	if loaded {
+		action, rule := evaluate(rules, cfg.DefaultAction, r, ip)
+		metricRuleHits.WithLabelValues(rule, action).Inc()
+		switch action {
+		case "deny":
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return "deny"
+		case "tarpit":
+			serveTarpit(w, r, cfg)
+			return "tarpit"
+		case "allow":
+			proxy.ServeHTTP(w, r)
+			return "allow"
+		}
+	}
+
+	if hasValidCookie(r, cfg) {
+		proxy.ServeHTTP(w, r)
+		return "verified"
+	}
+
+	if pathMatchesAny(cleanPath, bypassPaths) {
+		proxy.ServeHTTP(w, r)
+		return "bypass"
+	}
+
 	if !loaded {
 		proxy.ServeHTTP(w, r)
 		return "rules_loading"
-	}
-	action, rule := evaluate(rules, cfg.DefaultAction, r, ip)
-	metricRuleHits.WithLabelValues(rule, action).Inc()
-	switch action {
-	case "allow":
-		proxy.ServeHTTP(w, r)
-		return "allow"
-	case "deny":
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return "deny"
-	case "tarpit":
-		serveTarpit(w, r, cfg)
-		return "tarpit"
 	}
 
 	if cfg.Progressive.Enabled && tor == "" && pathMatchesAny(r.URL.Path, passivePaths) {
@@ -500,14 +601,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 	if !resolved {
 		requestURI := r.URL.RequestURI()
 		log.Printf("unresolved proxy %s: serving challenge without walkaway tracking (%s)", logIP(cfg, ip), sanitizeForLog(stripQuery(requestURI)))
-		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, true)
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, "", true)
 		return "challenge"
 	}
 
 	requestURI := r.URL.RequestURI()
 	if shared {
-		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, false)
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, "", false)
 		return "challenge"
+	}
+	if _, err := r.Cookie(switchCookie); err == nil {
+		http.SetCookie(w, newCookie(r, cfg, switchCookie, "", time.Unix(0, 0)))
+		if store.IncrWalkaway("switch:"+ipStr, cfg.Walkaway.TTL.Duration) <= switchAllowance {
+			serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, "", false)
+			return "challenge"
+		}
 	}
 	if fpKey, fp, ok := fingerprintKey(r, cfg, ip); ok {
 		if store.IsBlocked(fpKey) {
@@ -520,20 +628,33 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *Config, rules []
 			store.Block(fpKey, cfg.Ban.Duration.Duration)
 			metricBans.WithLabelValues("fingerprint").Inc()
 			log.Printf("banned fingerprint %s after %d walk-aways (ip=%s)", sanitizeForLog(fp), fpCount, logIP(cfg, ip))
-			http.Error(w, "forbidden", http.StatusForbidden)
+			serveBannedPage(w, r, cfg)
 			return "banned"
 		}
 	}
 
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		store.IncrWalkaway("load:"+ipStr, cfg.Walkaway.TTL.Duration)
+	}
 	count := store.IncrWalkaway(ipStr, cfg.Walkaway.TTL.Duration)
 	store.LogPath(ipStr, stripQuery(requestURI))
 	if count >= cfg.Walkaway.Threshold {
 		banClient(cfg, store, ip, count, "walk-aways")
-		http.Error(w, "forbidden", http.StatusForbidden)
+		serveBannedPage(w, r, cfg)
 		return "banned"
 	}
-	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, count == 1)
+	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), requestURI, "", count == 1)
 	return "challenge"
+}
+
+func serveBannedPage(w http.ResponseWriter, r *http.Request, cfg *Config) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	contact := ""
+	if cfg.Branding.ContactURL != "" {
+		contact = fmt.Sprintf("<p><a href=\"%s\">Contact support</a></p>", template.HTMLEscapeString(cfg.Branding.ContactURL))
+	}
+	fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Access Denied</title><style>body{font-family:system-ui,sans-serif;max-width:500px;margin:10vh auto;padding:1rem;color:#333;line-height:1.5}</style></head><body><h1>Access Denied</h1><p>You have been temporarily blocked due to too many failed attempts.</p><p>Request ID: <em>%s</em></p>%s</body></html>", requestID(), contact)
 }
 
 func banClient(cfg *Config, store Store, ip net.IP, count int, reason string) {
@@ -565,11 +686,17 @@ func retryChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, store S
 	if penalty != penaltyNone {
 		if n := store.IncrWalkaway(key, cfg.Walkaway.TTL.Duration); n >= limit {
 			banClient(cfg, store, ip, n, penalty)
-			http.Error(w, "forbidden", http.StatusForbidden)
+			serveBannedPage(w, r, cfg)
 			return
 		}
 	}
-	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, false)
+	errorMsg := ""
+	if penalty == penaltyFailed {
+		errorMsg = tryAgainMessage
+	} else if penalty == penaltyWalkaway {
+		errorMsg = "Verification timed out or was too fast. Please try again."
+	}
+	serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, errorMsg, false)
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store) {
@@ -593,12 +720,41 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	ipStr := ip.String()
 	returnTo := sanitizeReturnPath(r.FormValue("return_to"))
 
+	waitDenied := r.PostFormValue("wait") != "" && !waitAllowed(r, cfg, store, ip)
+	if waitDenied {
+		r.PostForm.Del("wait")
+	}
+
 	provider := providerForRequest(cfg, r)
+
+	maxAttempts := sliderVerifyMaxPerMin
+	if sharedTorIP(torKind(r, cfg, ip), ip) {
+		maxAttempts *= torAttemptFactor
+	}
+	if attempts := store.IncrWalkaway("vrate:"+ipStr, sliderVerifyWindow); attempts > maxAttempts {
+		metricChallenges.WithLabelValues(provider, "throttled").Inc()
+		log.Printf("verify throttled ip=%s provider=%s attempts=%d", logIP(cfg, ip), provider, attempts)
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyNone)
+		return
+	}
+
+	if waitDenied {
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "Try this check first.", false)
+		return
+	}
 
 	log.Printf("verify start ip=%s provider=%s return_to=%s token_len=%d", logIP(cfg, ip), provider, sanitizeForLog(returnTo), len(token))
 
+	if waitRequested(r) {
+		handleTimedVerify(w, r, cfg, store, ip, returnTo)
+		return
+	}
 	if provider == "slider" {
 		handleSliderVerify(w, r, cfg, store, ip, returnTo)
+		return
+	}
+	if provider == "jigsaw" {
+		handleJigsawVerify(w, r, cfg, store, ip, returnTo)
 		return
 	}
 
@@ -619,7 +775,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	}
 
 	metricChallenges.WithLabelValues(provider, "passed").Inc()
-	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s secure=%v)", logIP(cfg, ip), provider, cfg.CookieName, isSecureRequest(r, cfg))
+	log.Printf("verify success ip=%s provider=%s: issuing verified cookie (cookie_name=%s)", logIP(cfg, ip), provider, cfg.CookieName)
 
 	resetWalkaways(store, r, cfg, ip)
 	setVerifiedCookie(w, r, cfg)
@@ -651,6 +807,17 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 		return
 	}
 
+	if r.PostFormValue("check") != "" {
+		check := cfg.sliderChallenges.check(captchaID, answer, cfg.Slider.Tolerance)
+		if check == nil {
+			serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "That puzzle expired. Here is a new one.", false)
+			return
+		}
+		metricChallenges.WithLabelValues("slider", "checked").Inc()
+		renderChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "", false, check)
+		return
+	}
+
 	res := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance, cfg.Slider.MinSolveTime.Duration)
 	lowVariance := cfg.sliderChallenges.recordAnswer(ipStr, answer, sliderAnswerSamples, cfg.Slider.Tolerance, sliderAnswerWindow)
 
@@ -674,7 +841,150 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 	}
 
 	metricChallenges.WithLabelValues("slider", "passed").Inc()
-	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s secure=%v)", logIP(cfg, ip), cfg.CookieName, isSecureRequest(r, cfg))
+	log.Printf("verify success ip=%s provider=slider: issuing verified cookie (cookie_name=%s)", logIP(cfg, ip), cfg.CookieName)
+	resetWalkaways(store, r, cfg, ip)
+	setVerifiedCookie(w, r, cfg)
+	clearPassiveCookie(w, r, cfg)
+	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
+	finishVerify(w, r, returnTo)
+}
+
+func handleJigsawVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo string) {
+	ipStr := ip.String()
+	captchaID := r.FormValue("captcha_id")
+	tiles := r.PostForm["tile"]
+	a, errA, b, errB := 0, error(nil), 0, error(nil)
+	if len(tiles) == 2 {
+		a, errA = strconv.Atoi(tiles[0])
+		b, errB = strconv.Atoi(tiles[1])
+	}
+	if len(tiles) != 2 || errA != nil || errB != nil || a == b || a < 0 || b < 0 || a > 8 || b > 8 {
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "Select two tiles.", false)
+		return
+	}
+
+	maxAttempts := sliderVerifyMaxPerMin
+	if sharedTorIP(torKind(r, cfg, ip), ip) {
+		maxAttempts *= torAttemptFactor
+	}
+	if !cfg.sliderChallenges.allowAttempt(ipStr, sliderVerifyWindow, maxAttempts) {
+		metricChallenges.WithLabelValues("jigsaw", "throttled").Inc()
+		log.Printf("jigsaw verify throttled ip=%s", logIP(cfg, ip))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyNone)
+		return
+	}
+
+	res := cfg.sliderChallenges.consumeJigsaw(captchaID, a, b, cfg.Slider.MinSolveTime.Duration)
+	if res.tooFast {
+		metricChallenges.WithLabelValues("jigsaw", "automated").Inc()
+		log.Printf("jigsaw verify too fast ip=%s", logIP(cfg, ip))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyWalkaway)
+		return
+	}
+	if !res.ok {
+		metricChallenges.WithLabelValues("jigsaw", "failed").Inc()
+		log.Printf("jigsaw verify failed ip=%s id=%v", logIP(cfg, ip), sanitizeForLog(captchaID))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyFailed)
+		return
+	}
+
+	metricChallenges.WithLabelValues("jigsaw", "passed").Inc()
+	log.Printf("verify success ip=%s provider=jigsaw: issuing verified cookie (cookie_name=%s)", logIP(cfg, ip), cfg.CookieName)
+	resetWalkaways(store, r, cfg, ip)
+	setVerifiedCookie(w, r, cfg)
+	clearPassiveCookie(w, r, cfg)
+	finishVerify(w, r, returnTo)
+}
+
+func troubleTokenAt(r *http.Request, cfg *Config, at time.Time) string {
+	ts := strconv.FormatInt(at.Unix(), 10)
+	return ts + "." + hex.EncodeToString(cookieMAC(cfg.CookieSecret, "trouble."+ts, cookieBinding(r, cfg)))
+}
+
+func troubleTokenAge(r *http.Request, cfg *Config, token string) (time.Duration, bool) {
+	ts, sig, ok := strings.Cut(token, ".")
+	if !ok {
+		return 0, false
+	}
+	unix, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	got, err := hex.DecodeString(sig)
+	if err != nil || !hmac.Equal(got, cookieMAC(cfg.CookieSecret, "trouble."+ts, cookieBinding(r, cfg))) {
+		return 0, false
+	}
+	return time.Since(time.Unix(unix, 0)), true
+}
+
+func troubleAttemptCount(store Store, ip net.IP) int {
+	key := ip.String()
+	return store.Walkaways("load:"+key) + store.Walkaways("fail:"+key) + store.Walkaways("switch:"+key)
+}
+
+func waitAllowed(r *http.Request, cfg *Config, store Store, ip net.IP) bool {
+	if _, ok := cfg.sliderChallenges.timedRemaining(r.PostFormValue("captcha_id"), timedWait); ok {
+		return true
+	}
+	if age, ok := troubleTokenAge(r, cfg, r.PostFormValue("trouble")); ok && age >= troubleDelay && age <= troubleTokenMaxAge {
+		return true
+	}
+	return troubleAttemptCount(store, ip) >= troubleAttempts
+}
+
+func handleWait(w http.ResponseWriter, r *http.Request, cfg *Config, store Store) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ip, _ := clientIP(r, cfg)
+	if ip == nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	returnTo := sanitizeReturnPath(r.URL.Query().Get("return_to"))
+	if _, ok := cfg.sliderChallenges.timedRemaining(r.URL.Query().Get("captcha_id"), timedWait); !ok {
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+	handleTimedVerify(w, r, cfg, store, ip, returnTo)
+}
+
+func handleTimedVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo string) {
+	ipStr := ip.String()
+	captchaID := r.FormValue("captcha_id")
+
+	maxAttempts := sliderVerifyMaxPerMin
+	if sharedTorIP(torKind(r, cfg, ip), ip) {
+		maxAttempts *= torAttemptFactor
+	}
+	if !cfg.sliderChallenges.allowAttempt(ipStr, sliderVerifyWindow, maxAttempts) {
+		metricChallenges.WithLabelValues("timed", "throttled").Inc()
+		log.Printf("timed verify throttled ip=%s", logIP(cfg, ip))
+		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyNone)
+		return
+	}
+
+	if captchaID == "" {
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "", false)
+		return
+	}
+
+	remaining, ok := cfg.sliderChallenges.consumeTimed(captchaID, timedWait)
+	if !ok {
+		metricChallenges.WithLabelValues("timed", "failed").Inc()
+		log.Printf("timed verify failed ip=%s id=%v", logIP(cfg, ip), sanitizeForLog(captchaID))
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "That wait expired. Please wait again.", false)
+		return
+	}
+	if remaining > 0 {
+		metricChallenges.WithLabelValues("timed", "early").Inc()
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "Almost there. Your wait is still running.", false)
+		return
+	}
+
+	metricChallenges.WithLabelValues("timed", "passed").Inc()
+	log.Printf("verify success ip=%s provider=timed: issuing verified cookie (cookie_name=%s)", logIP(cfg, ip), cfg.CookieName)
 	resetWalkaways(store, r, cfg, ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)

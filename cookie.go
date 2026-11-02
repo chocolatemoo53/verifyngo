@@ -29,8 +29,17 @@ func isSecureRequest(r *http.Request, cfg *Config) bool {
 	return false
 }
 
-func cookieBinding(r *http.Request) string {
-	return r.UserAgent() + "\n" + r.Header.Get("Accept-Language")
+func cookieBinding(r *http.Request, cfg *Config) string {
+	b := r.UserAgent() + "\n" + r.Header.Get("Accept-Language")
+	if cfg != nil {
+		if ip, _ := clientIP(r, cfg); ip != nil {
+			tor := torKind(r, cfg, ip)
+			if !sharedTorIP(tor, ip) {
+				b += "\n" + clientNetwork(ip)
+			}
+		}
+	}
+	return b
 }
 
 func cookieMAC(secret, payload, binding string) []byte {
@@ -85,11 +94,11 @@ func tlsCipherHash(r *http.Request, cfg *Config) string {
 }
 
 func issueCookieValue(r *http.Request, cfg *Config, expiry time.Time, scope string) string {
-	return signCookie(cfg.CookieSecret, expiry, scope, tlsCipherHash(r, cfg), cookieBinding(r))
+	return signCookie(cfg.CookieSecret, expiry, scope, tlsCipherHash(r, cfg), cookieBinding(r, cfg))
 }
 
 func validCookieValue(r *http.Request, cfg *Config, value, scope string) bool {
-	return verifyCookie(cfg.CookieSecret, value, scope, tlsCipherHash(r, cfg), cookieBinding(r))
+	return verifyCookie(cfg.CookieSecret, value, scope, tlsCipherHash(r, cfg), cookieBinding(r, cfg))
 }
 
 func browserMismatch(r *http.Request, cfg *Config) string {
@@ -112,7 +121,7 @@ func newCookie(r *http.Request, cfg *Config, name, value string, expiry time.Tim
 		Path:     "/",
 		Expires:  expiry,
 		HttpOnly: true,
-		Secure:   isSecureRequest(r, cfg),
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	}
 

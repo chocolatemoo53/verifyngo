@@ -49,9 +49,32 @@ func replayValues(r *http.Request) url.Values {
 	return r.PostForm
 }
 
+var sensitiveFieldNames = map[string]bool{
+	"password": true, "pwd": true, "passwd": true, "pass": true,
+	"secret": true, "token": true, "api_key": true, "apikey": true,
+	"access_token": true, "auth": true, "authorization": true,
+	"credit_card": true, "card_number": true, "cvv": true, "cvc": true, "ssn": true,
+}
+
+func isSensitiveFieldName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if sensitiveFieldNames[lower] {
+		return true
+	}
+	for s := range sensitiveFieldNames {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func replayFields(v url.Values) []replayField {
 	names := make([]string, 0, len(v))
 	for name := range v {
+		if isSensitiveFieldName(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

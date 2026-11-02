@@ -81,6 +81,22 @@ Each network (/24 for IPv4, /48 for IPv6) can get at most `progressive.max_reque
 
 When a form POST is challenged, such as a SearXNG search, its fields are carried through the challenge. After it is solved, the browser sends the same POST again, automatically with JavaScript or with a Continue button without it. This covers same-origin `application/x-www-form-urlencoded` forms up to 16 KB. Cross-site POSTs, file uploads, and JSON bodies are not carried, and switching captcha provider drops the fields.
 
+## Checking the slider position
+
+The slider has a Check position button that works without JavaScript. The server redraws the same puzzle and says whether the piece is in place, in large text and with a click sound where the browser allows it. Each puzzle allows 3 checks, and a check does not count as a failed attempt.
+
+## Tile puzzle
+
+When the slider is enabled, visitors can also choose a tile puzzle: a picture cut into nine tiles with two swapped, solved by selecting those two tiles. It works without JavaScript and by keyboard. In the MCA-Bench study, general vision models almost never solved this kind of task, but a script written for it can, so treat it as a barrier to general AI agents rather than targeted bots.
+
+Correct and wrong results play short, original sounds in the style of 90s desktop alerts where the browser allows autoplay.
+
+## Having trouble
+
+A "Having trouble?" section appears on a challenge page after a minute, or right away once a visitor has made 3 attempts, counting page loads, failed answers and switched captchas. It lets them wait 15 seconds instead of completing the check, and it is not a captcha option. The delay is enforced by the server with a signed timestamp. The minute is revealed with CSS, so browsers that lack it show the section immediately, though the server still holds them to the same rules.
+
+A meta refresh finishes the wait without scripts or a button press, and clients that do not follow it never get through. If a form submission is pending, a refresh would lose it, so the page submits itself with JavaScript and otherwise keeps a Continue button. A determined bot can also wait, so this keeps people moving rather than stopping targeted automation.
+
 ## Walk-aways and failed attempts
 
 Every challenge served counts as a walk-away, and `walkaway.threshold` walk-aways ban the client. A failed attempt shows the challenge again right away without counting a walk-away. Failed attempts have their own counter, and three times `walkaway.threshold` failures ban the client. Answers that look automated, like a slider solved too fast or the same answer repeated, still count as walk-aways. Solving a challenge clears both counters.

@@ -124,6 +124,7 @@ type Config struct {
 	compiledWhitelist      compiledWhitelist
 	compiledTrustedProxies compiledWhitelist
 	torExits               atomic.Value
+	store                  Store
 	sliderChallenges       *sliderChallengeStore
 
 	Store struct {

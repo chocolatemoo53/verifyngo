@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 type Store interface {
 	IncrWalkaway(ip string, ttl time.Duration) int
 	ResetWalkaway(ip string)
+	Walkaways(ip string) int
 	Block(ip string, dur time.Duration)
 	IsBlocked(ip string) bool
 	ShouldReport(ip string, cooldown time.Duration) bool
@@ -136,6 +138,16 @@ func (s *memoryStore) IncrWalkaway(ip string, ttl time.Duration) int {
 	e.Count++
 	s.walkaways[ip] = e
 	s.dirty = true
+	return e.Count
+}
+
+func (s *memoryStore) Walkaways(ip string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.walkaways[ip]
+	if !ok || time.Now().After(e.Expires) {
+		return 0
+	}
 	return e.Count
 }
 
@@ -373,6 +385,19 @@ func (s *redisStore) IncrWalkaway(ip string, ttl time.Duration) int {
 		return 0
 	}
 	return int(incr.Val())
+}
+
+func (s *redisStore) Walkaways(ip string) int {
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	n, err := s.rdb.Get(ctx, s.k("walkaway", ip)).Int()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			storeError("get walkaway", err)
+		}
+		return 0
+	}
+	return n
 }
 
 func (s *redisStore) ResetWalkaway(ip string) {

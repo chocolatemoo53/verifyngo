@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/binary"
+	"fmt"
 	"html/template"
 	"log"
 	"math/rand"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 //go:embed tarpit_corpus.txt
@@ -203,6 +205,35 @@ func serveTarpit(w http.ResponseWriter, r *http.Request, cfg *Config) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	flusher, hasFlusher := w.(http.Flusher)
+	if hasFlusher {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>%s</title></head>\n<body>\n<article>\n<h1>%s</h1>\n", template.HTMLEscapeString(page.Title), template.HTMLEscapeString(page.Title))
+		flusher.Flush()
+
+		ctx := r.Context()
+		for _, p := range page.Paragraphs {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			fmt.Fprintf(w, "<p>%s</p>\n", template.HTMLEscapeString(p))
+			flusher.Flush()
+		}
+
+		fmt.Fprintf(w, "<h2>Related reading</h2>\n<ul>\n")
+		for _, link := range page.MazeLinks {
+			escaped := template.HTMLEscapeString(link)
+			fmt.Fprintf(w, "<li><a href=\"%s\">%s</a></li>\n", escaped, escaped)
+		}
+		fmt.Fprintf(w, "</ul>\n</article>\n</body></html>")
+		flusher.Flush()
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_ = tarpitTpl.Execute(w, page)
 }

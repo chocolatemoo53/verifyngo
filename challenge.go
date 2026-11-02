@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"verifyngo/providers"
 )
@@ -24,12 +26,17 @@ func requestID() string {
 	return hex.EncodeToString(b)
 }
 
+const tryAgainMessage = "Try again."
+
+const trapHTML = `<div hidden aria-hidden="true"><a href="/__cp_trap" rel="nofollow" tabindex="-1">Directory Index</a></div>`
+
 const challengeTpl = `<!DOCTYPE html>
 <html lang="{{.Lang}}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
+<title>{{if .ErrorMsg}}Error: {{end}}{{if .SliderCheckMsg}}{{.SliderCheckMsg}} {{end}}{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
 {{if .SliderSwitchURL}}<noscript><meta http-equiv="refresh" content="2;url={{.SliderSwitchURL}}"></noscript>{{end}}
+{{if .WaitRefreshURL}}<meta http-equiv="refresh" content="{{.TimedRemaining}};url={{.WaitRefreshURL}}">{{end}}
 {{if .Nonce}}
 <script nonce="{{.Nonce}}">
   window.CAP_CSS_NONCE = '{{.Nonce}}';
@@ -216,6 +223,100 @@ const challengeTpl = `<!DOCTYPE html>
     cursor: pointer;
   }
   .verifyngo-submit:hover { filter: brightness(1.1); }
+  .verifyngo-jigsaw {
+    position: relative;
+    width: 100%;
+    max-width: 24rem;
+    margin: 0 auto;
+  }
+  .verifyngo-jigsaw img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+  }
+  .verifyngo-jigsaw-grid {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+  }
+  .verifyngo-tile-input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+  }
+  .verifyngo-tile {
+    position: relative;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  }
+  .verifyngo-tile-input:checked + .verifyngo-tile {
+    box-shadow: inset 0 0 0 5px #fff, inset 0 0 0 8px #000;
+  }
+  .verifyngo-tile-input:checked + .verifyngo-tile::after {
+    content: "\2713";
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    line-height: 1.8rem;
+    border-radius: 50%;
+    text-align: center;
+    font-weight: 700;
+    color: #000;
+    background: #fff;
+  }
+  .verifyngo-tile-input:focus-visible + .verifyngo-tile {
+    outline: 3px solid var(--cp-accent);
+    outline-offset: -8px;
+  }
+  .verifyngo-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  @keyframes verifyngo-reveal {
+    to { visibility: visible; }
+  }
+  @supports (animation-name: verifyngo-reveal) {
+    .verifyngo-trouble-delayed {
+      visibility: hidden;
+      animation: verifyngo-reveal 0s linear {{.TroubleDelaySeconds}}s forwards;
+    }
+  }
+  .verifyngo-secondary {
+    margin-inline: 0.25rem;
+    color: var(--cp-text);
+    background: transparent;
+    border: 2px solid var(--cp-accent);
+  }
+  .verifyngo-check {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin: 0 0 1rem;
+  }
+  .verifyngo-check-ok {
+    padding: 0.6rem 1rem;
+    border: 3px solid var(--cp-accent);
+    border-radius: 8px;
+  }
+  .verifyngo-alert {
+    background: rgba(220, 53, 69, 0.15);
+    border: 1px solid #dc3545;
+    color: var(--cp-text);
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+  }
   cap-widget {
     --cap-background: color-mix(in srgb, var(--cp-bg) 85%, white 6%);
     --cap-border-color: color-mix(in srgb, var(--cp-text) 25%, transparent);
@@ -241,7 +342,9 @@ const challengeTpl = `<!DOCTYPE html>
 <main class="verifyngo-card">
   {{if .LogoURL}}<img class="verifyngo-logo" src="{{.LogoURL}}" alt="">{{end}}
   <h1 class="verifyngo-title">{{if .Title}}{{.Title}}{{else}}Checking you are not a bot{{end}}</h1>
-  <p class="verifyngo-status">Please complete the <em>{{.ChallengeName}}</em> challenge below to verify you are not a bot...</p>
+  {{if .ErrorMsg}}<div role="alert" class="verifyngo-alert">{{.ErrorMsg}}</div>{{end}}
+  {{if .Sound}}<audio autoplay src="{{.Sound}}"></audio>{{end}}
+  <p class="verifyngo-status">Please complete this check to confirm you are not a bot.</p>
 
   <div class="verifyngo-widget" role="group" aria-label="Captcha challenge">
   <input type="hidden" id="verifyngo-return-to" value="{{.ReturnTo}}">
@@ -283,7 +386,7 @@ const challengeTpl = `<!DOCTYPE html>
   <style nonce="{{.Nonce}}">
     .verifyngo-slider {
       position: relative;
-      max-width: {{.SliderWidth}}px;
+      width: 100%;
       margin: 0 auto;
       border-radius: 10px;
       overflow: hidden;
@@ -304,6 +407,11 @@ const challengeTpl = `<!DOCTYPE html>
       appearance: none;
       background: transparent;
       cursor: pointer;
+    }
+    .verifyngo-range:focus-visible {
+      outline: 3px solid {{.AccentColor}};
+      outline: 3px solid var(--cp-accent);
+      outline-offset: -3px;
     }
     .verifyngo-range::-webkit-slider-runnable-track {
       height: 100%;
@@ -348,13 +456,45 @@ const challengeTpl = `<!DOCTYPE html>
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
     <input type="hidden" name="captcha_id" value="{{.SliderChallengeID}}">
     {{template "replay" .}}
+    <p id="slider-desc" class="verifyngo-status">Slide the piece into the slot.</p>
+    {{if .SliderCheckMsg}}<p class="verifyngo-check{{if .SliderInPlace}} verifyngo-check-ok{{end}}" role="status">{{.SliderCheckMsg}}</p>{{end}}
     <div class="verifyngo-slider">
-      <img class="verifyngo-slider-img" src="{{.SliderBg}}" alt="Move the piece to the marked slot">
-      <input type="range" class="verifyngo-range" name="answer" min="0" max="{{.SliderMax}}" step="1" value="0">
+      <img class="verifyngo-slider-img" src="{{.SliderBg}}" alt="Puzzle canvas with marked target slot">
+      <input type="range" id="slider-input" class="verifyngo-range" name="answer" min="0" max="{{.SliderMax}}" step="{{.SliderStep}}" value="{{.SliderValue}}" aria-label="Puzzle piece position" aria-describedby="slider-desc"{{if .SliderCheckAgain}} autofocus{{end}}>
     </div>
-    <p class="verifyngo-status">Drag the piece so it lines up with the slot</p>
+    <button type="submit" class="verifyngo-submit"{{if .SliderInPlace}} autofocus{{end}}>Verify</button>
+    {{if .SliderCanCheck}}<button type="submit" name="check" value="1" class="verifyngo-submit verifyngo-secondary">Check position</button>{{end}}
+  </form>
+  {{else if eq .Provider "jigsaw"}}
+  <form id="jigsaw-form" method="POST" action="/__verify">
+    <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    <input type="hidden" name="captcha_id" value="{{.SliderChallengeID}}">
+    {{template "replay" .}}
+    <p id="jigsaw-desc" class="verifyngo-status">Two tiles are swapped. Select them.</p>
+    <div class="verifyngo-jigsaw" role="group" aria-labelledby="jigsaw-desc">
+      <img src="{{.JigsawImage}}" alt="Picture cut into nine tiles">
+      <div class="verifyngo-jigsaw-grid">
+        {{range .JigsawTiles}}<input type="checkbox" id="tile-{{.Index}}" class="verifyngo-tile-input" name="tile" value="{{.Index}}"{{if .Checked}} checked{{end}}><label for="tile-{{.Index}}" class="verifyngo-tile"><span class="verifyngo-sr">Row {{.Row}}, column {{.Column}}</span></label>
+        {{end}}
+      </div>
+    </div>
     <button type="submit" class="verifyngo-submit">Verify</button>
   </form>
+  {{else if eq .Provider "timed"}}
+  <form id="timed-form" method="POST" action="/__verify">
+    <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+    <input type="hidden" name="captcha_id" value="{{.SliderChallengeID}}">
+    <input type="hidden" name="wait" value="1">
+    <input type="hidden" name="trouble" value="{{.TroubleToken}}">
+    {{template "replay" .}}
+    <p id="timed-status" class="verifyngo-status" role="status">{{if .WaitRefreshURL}}Please wait {{.TimedRemaining}} seconds. You will continue automatically. If nothing happens, select Continue.{{else}}Please wait {{.TimedRemaining}} seconds, then select Continue.{{end}}</p>
+    <button type="submit" class="verifyngo-submit">Continue</button>
+  </form>
+  <script nonce="{{.Nonce}}">
+    setTimeout(function () {
+      {{if .WaitRefreshURL}}document.getElementById('timed-status').textContent = 'You can continue now.';{{else}}document.getElementById('timed-form').submit();{{end}}
+    }, {{.TimedRemaining}} * 1000);
+  </script>
   {{else}}
   <form method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
@@ -378,19 +518,77 @@ const challengeTpl = `<!DOCTYPE html>
   <details class="verifyngo-details">
     <summary>Why am I seeing this?</summary>
     <p>{{.DetailsText}}</p>
+    {{if ne .Provider "timed"}}<p>If this check doesn't work for you, another option appears here after a minute.</p>{{end}}
   </details>
+  {{if ne .Provider "timed"}}
+  <details class="verifyngo-details verifyngo-trouble{{if not .TroubleNow}} verifyngo-trouble-delayed{{end}}">
+    <summary>Having trouble?</summary>
+    <p>If this check doesn't work for you, you can wait {{.TimedRemaining}} seconds instead.</p>
+    <form method="POST" action="/__verify">
+      <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+      <input type="hidden" name="wait" value="1">
+      <input type="hidden" name="trouble" value="{{.TroubleToken}}">
+      {{template "replay" .}}
+      <button type="submit" class="verifyngo-submit">Wait instead</button>
+    </form>
+  </details>
+  {{end}}
 </main>
 <footer class="verifyngo-footer">
   Request Id <em>{{.RequestID}}</em>{{if .ContactURL}} | <a href="{{.ContactURL}}">Contact</a>{{end}}
   {{if eq .Provider "turnstile"}}<br>Protected by Cloudflare Turnstile · <a href="https://www.cloudflare.com/privacypolicy/">Privacy</a> · <a href="https://www.cloudflare.com/terms/">Terms</a>{{end}}
   {{if eq .Provider "hcaptcha"}}<br>Protected by hCaptcha · <a href="https://www.hcaptcha.com/privacy">Privacy</a> · <a href="https://www.hcaptcha.com/terms">Terms</a>{{end}}
 </footer>
+{{.TrapHTML}}
 </body></html>
 {{define "replay"}}{{range .Replay}}<input type="hidden" name="__replay_{{.Name}}" value="{{.Value}}">{{end}}{{end}}`
 
 var tpl = template.Must(template.New("challenge").Parse(challengeTpl))
 
-func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL, ip, requestURI string, logServed bool) {
+type jigsawTile struct {
+	Index, Row, Column int
+	Checked            bool
+}
+
+func waitRequested(r *http.Request) bool {
+	return r.URL.Path == "/__wait" || (r.URL.Path == "/__verify" && r.PostFormValue("wait") != "")
+}
+
+func providerDisplayName(p string) string {
+	switch p {
+	case "cap":
+		return "Automatic check"
+	case "slider":
+		return "Visual puzzle"
+	case "jigsaw":
+		return "Tile puzzle"
+	case "turnstile":
+		return "Cloudflare Turnstile"
+	case "hcaptcha":
+		return "hCaptcha"
+	case "recaptcha":
+		return "reCAPTCHA"
+	default:
+		return p
+	}
+}
+
+func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL, ip, requestURI, errorMsg string, logServed bool) {
+	renderChallenge(w, r, cfg, apiURL, ip, requestURI, errorMsg, logServed, nil)
+}
+
+func sliderCheckMessage(check *sliderCheck) string {
+	switch {
+	case check == nil:
+		return ""
+	case check.InPlace:
+		return "That's correct."
+	default:
+		return "Try again."
+	}
+}
+
+func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL, ip, requestURI, errorMsg string, logServed bool, check *sliderCheck) {
 	id := requestID()
 	if logServed {
 		log.Printf("challenge served id=%s ip=%s path=%s", id, ip, requestURI)
@@ -398,17 +596,21 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 
 	replay := replayFields(replayValues(r))
 	provider := providerForRequest(cfg, r)
+	if waitRequested(r) {
+		provider = "timed"
+	}
 	metricChallenges.WithLabelValues(provider, "issued").Inc()
 
 	var switcher template.HTML
 	available := availableProviders(cfg)
 	if len(available) > 1 {
 		var b strings.Builder
-		b.WriteString("<div class=\"verifyngo-switch\"><span class=\"verifyngo-switch-label\">Switch captcha:</span>")
+		b.WriteString("<div class=\"verifyngo-switch\"><span class=\"verifyngo-switch-label\">Choose how to verify:</span>")
 		for _, p := range available {
+			label := providerDisplayName(p)
 			if p == provider {
-				b.WriteString("<strong class=\"verifyngo-switch-current\">")
-				b.WriteString(p)
+				b.WriteString("<strong class=\"verifyngo-switch-current\" aria-current=\"page\">")
+				b.WriteString(label)
 				b.WriteString("</strong>")
 			} else {
 				u := url.URL{
@@ -419,7 +621,7 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 				b.WriteString(" <a href=\"")
 				b.WriteString(u.String())
 				b.WriteString("\">")
-				b.WriteString(p)
+				b.WriteString(label)
 				b.WriteString("</a>")
 			}
 		}
@@ -436,6 +638,9 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	}
 
 	scriptURL := scriptURLForRequest(cfg, r)
+	if provider == "timed" {
+		scriptURL = ""
+	}
 
 	sliderID := ""
 	sliderBg := ""
@@ -443,12 +648,88 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	sliderPiecePct := ""
 	sliderMax := 0
 	sliderWidth := cfg.Slider.Width
+	timedRemaining := int(timedWait / time.Second)
+	if provider == "timed" {
+		id := r.FormValue("captcha_id")
+		if remaining, ok := cfg.sliderChallenges.timedRemaining(id, timedWait); ok {
+			sliderID = id
+			timedRemaining = max(int(math.Ceil(remaining.Seconds())), 1)
+		} else if challengeID, err := cfg.sliderChallenges.issueTimed(); err != nil {
+			log.Printf("timed: issue challenge: %v", err)
+		} else {
+			sliderID = challengeID
+		}
+	}
+	sliderValue := 0
+	if check != nil {
+		sliderValue = check.Value
+	}
+	jigsawImage := ""
+	var jigsawTiles []jigsawTile
+	if provider == "jigsaw" {
+		var data *jigsawChallenge
+		var err error
+		id := ""
+		if r.URL.Path == "/__verify" {
+			id = r.PostFormValue("captcha_id")
+		}
+		seed, same := cfg.sliderChallenges.jigsawSeed(id)
+		if same {
+			data, err = buildJigsawFromSeed(seed)
+		} else {
+			data, err = buildJigsawChallenge()
+			if err == nil {
+				id, err = cfg.sliderChallenges.issueJigsaw(data.A, data.B, data.Seed)
+			}
+		}
+		if err != nil {
+			log.Printf("jigsaw: build challenge: %v", err)
+		} else {
+			sliderID = id
+			jigsawImage = data.ImageURI
+			for i := 0; i < 9; i++ {
+				checked := same && slices.Contains(r.PostForm["tile"], strconv.Itoa(i))
+				jigsawTiles = append(jigsawTiles, jigsawTile{Index: i, Row: i/3 + 1, Column: i%3 + 1, Checked: checked})
+			}
+		}
+	}
+	troubleNow := false
+	if cfg.store != nil {
+		if addr, _ := clientIP(r, cfg); addr != nil {
+			troubleNow = troubleAttemptCount(cfg.store, addr) >= troubleAttempts
+		}
+	}
+	sound := ""
+	switch {
+	case check != nil && check.InPlace:
+		sound = soundCorrect
+	case check != nil || errorMsg == tryAgainMessage:
+		sound = soundWrong
+	}
+	waitRefreshURL := ""
+	if provider == "timed" && sliderID != "" && len(replay) == 0 {
+		waitRefreshURL = (&url.URL{
+			Path:     "/__wait",
+			RawQuery: url.Values{"captcha_id": {sliderID}, "return_to": {requestURI}}.Encode(),
+		}).String()
+	}
 	if provider == "slider" {
-		data, err := buildSliderChallenge(cfg)
+		var data *sliderChallengeData
+		var err error
+		if check != nil {
+			data, err = buildSliderFromSeed(cfg, check.Seed)
+		} else {
+			data, err = buildSliderChallenge(cfg)
+		}
 		if err != nil {
 			log.Printf("slider: build challenge: %v", err)
 		} else {
-			challengeID, err := cfg.sliderChallenges.issue(data.Answer)
+			challengeID := ""
+			if check != nil {
+				challengeID = check.ID
+			} else {
+				challengeID, err = cfg.sliderChallenges.issueSlider(data.Answer, data.Seed)
+			}
 			if err != nil {
 				log.Printf("slider: issue challenge: %v", err)
 			} else {
@@ -479,38 +760,53 @@ func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL,
 	}
 	w.WriteHeader(http.StatusOK)
 	_ = tpl.Execute(w, map[string]interface{}{
-		"Provider":          provider,
-		"ScriptURL":         scriptURL,
-		"CapAssetsURL":      cfg.Cap.AssetsURL,
-		"APIURL":            apiURL,
-		"SiteKey":           siteKeyForRequest(cfg, r),
-		"LogoURL":           cfg.Branding.LogoURL,
-		"CSSURL":            cfg.Branding.CSSURL,
-		"Title":             cfg.Branding.Title,
-		"AccentColor":       cfg.Branding.AccentColor,
-		"BackgroundColor":   cfg.Branding.BackgroundColor,
-		"TextColor":         cfg.Branding.TextColor,
-		"FontFamily":        cfg.Branding.FontFamily,
-		"FontURL":           cfg.Branding.FontURL,
-		"DetailsText":       cfg.Branding.DetailsText,
-		"ContactURL":        cfg.Branding.ContactURL,
-		"Lang":              cfg.Branding.Lang,
-		"RequestID":         id,
-		"ChallengeName":     provider,
-		"ReturnTo":          requestURI,
-		"Replay":            replay,
-		"ProviderSwitcher":  switcher,
-		"WidgetTheme":       widgetTheme(cfg.Branding.BackgroundColor),
-		"AccentTextColor":   accentTextColor(cfg.Branding.AccentColor),
-		"CapCheckmark":      capCheckmark(cfg.Branding.AccentColor),
-		"Nonce":             nonce,
-		"SliderChallengeID": sliderID,
-		"SliderBg":          template.URL(sliderBg),
-		"SliderPiece":       template.URL(sliderPiece),
-		"SliderPiecePct":    sliderPiecePct,
-		"SliderMax":         sliderMax,
-		"SliderWidth":       sliderWidth,
-		"SliderSwitchURL":   sliderSwitchURL,
+		"Provider":            provider,
+		"ErrorMsg":            errorMsg,
+		"ScriptURL":           scriptURL,
+		"CapAssetsURL":        cfg.Cap.AssetsURL,
+		"APIURL":              apiURL,
+		"SiteKey":             siteKeyForRequest(cfg, r),
+		"LogoURL":             cfg.Branding.LogoURL,
+		"CSSURL":              cfg.Branding.CSSURL,
+		"Title":               cfg.Branding.Title,
+		"AccentColor":         cfg.Branding.AccentColor,
+		"BackgroundColor":     cfg.Branding.BackgroundColor,
+		"TextColor":           cfg.Branding.TextColor,
+		"FontFamily":          cfg.Branding.FontFamily,
+		"FontURL":             cfg.Branding.FontURL,
+		"DetailsText":         cfg.Branding.DetailsText,
+		"ContactURL":          cfg.Branding.ContactURL,
+		"Lang":                cfg.Branding.Lang,
+		"RequestID":           id,
+		"TimedRemaining":      timedRemaining,
+		"TroubleNow":          troubleNow,
+		"TroubleToken":        troubleTokenAt(r, cfg, time.Now()),
+		"TroubleDelaySeconds": int(troubleDelay / time.Second),
+		"TrapHTML":            template.HTML(trapHTML),
+		"WaitRefreshURL":      waitRefreshURL,
+		"ReturnTo":            requestURI,
+		"Replay":              replay,
+		"ProviderSwitcher":    switcher,
+		"WidgetTheme":         widgetTheme(cfg.Branding.BackgroundColor),
+		"AccentTextColor":     accentTextColor(cfg.Branding.AccentColor),
+		"CapCheckmark":        capCheckmark(cfg.Branding.AccentColor),
+		"Nonce":               nonce,
+		"SliderChallengeID":   sliderID,
+		"SliderStep":          max(cfg.Slider.Tolerance, 1),
+		"SliderValue":         sliderValue,
+		"SliderCheckMsg":      sliderCheckMessage(check),
+		"SliderInPlace":       check != nil && check.InPlace,
+		"SliderCheckAgain":    check != nil && !check.InPlace,
+		"SliderCanCheck":      check == nil || (check.Left > 0 && !check.InPlace),
+		"Sound":               template.URL(sound),
+		"JigsawImage":         template.URL(jigsawImage),
+		"JigsawTiles":         jigsawTiles,
+		"SliderBg":            template.URL(sliderBg),
+		"SliderPiece":         template.URL(sliderPiece),
+		"SliderPiecePct":      sliderPiecePct,
+		"SliderMax":           sliderMax,
+		"SliderWidth":         sliderWidth,
+		"SliderSwitchURL":     sliderSwitchURL,
 	})
 }
 
@@ -562,6 +858,7 @@ func buildCSP(cfg *Config, nonce, scriptURL string) string {
 
 	return strings.Join([]string{
 		"default-src 'none'",
+		"media-src data:",
 		"script-src " + strings.Join(script, " "),
 		"style-src " + strings.Join(style, " "),
 		"img-src " + strings.Join(img, " "),
@@ -712,9 +1009,9 @@ func chosenProvider(cfg *Config, r *http.Request) string {
 			if cfg.HCaptcha.SiteKey != "" {
 				return "hcaptcha"
 			}
-		case "slider":
+		case "slider", "jigsaw":
 			if cfg.Slider.Enabled {
-				return "slider"
+				return p
 			}
 		}
 	}
@@ -751,6 +1048,7 @@ func availableProviders(cfg *Config) []string {
 	}
 	if cfg.Slider.Enabled {
 		out = append(out, "slider")
+		out = append(out, "jigsaw")
 	}
 	return out
 }
@@ -765,7 +1063,7 @@ func scriptURLForRequest(cfg *Config, r *http.Request) string {
 	case "hcaptcha":
 		h := &providers.HCaptcha{}
 		return h.WidgetScriptURL()
-	case "slider":
+	case "slider", "jigsaw":
 		return ""
 	default:
 		t := &providers.Turnstile{}
@@ -779,7 +1077,7 @@ func siteKeyForRequest(cfg *Config, r *http.Request) string {
 		return cfg.Cap.SiteKey
 	case "hcaptcha":
 		return cfg.HCaptcha.SiteKey
-	case "slider":
+	case "slider", "jigsaw":
 		return ""
 	default:
 		return cfg.Turnstile.SiteKey

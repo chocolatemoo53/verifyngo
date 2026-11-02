@@ -21,6 +21,9 @@ const (
 	sliderVerifyMaxPerMin = 12
 	sliderAnswerWindow    = 15 * time.Minute
 	sliderAnswerSamples   = 4
+	sliderCheckLimit      = 3
+	jigsawTileSize        = 120
+	jigsawMinSeam         = 12000.0
 )
 
 type tabShape int
@@ -70,6 +73,10 @@ func inTab(shape tabShape, dx, dy, r int) bool {
 
 type sliderChallenge struct {
 	answer  int
+	timed   bool
+	jigsaw  bool
+	seed    int64
+	checks  int
 	expires time.Time
 	issued  time.Time
 }
@@ -148,6 +155,51 @@ func (s *sliderChallengeStore) sweepOnce() {
 }
 
 func (s *sliderChallengeStore) issue(answer int) (string, error) {
+	return s.add(sliderChallenge{answer: answer})
+}
+
+func (s *sliderChallengeStore) issueSlider(answer int, seed int64) (string, error) {
+	return s.add(sliderChallenge{answer: answer, seed: seed})
+}
+
+func (s *sliderChallengeStore) issueJigsaw(a, b int, seed int64) (string, error) {
+	return s.add(sliderChallenge{jigsaw: true, answer: jigsawPair(a, b), seed: seed})
+}
+
+func (s *sliderChallengeStore) jigsawSeed(id string) (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.challenges[id]
+	if !ok || !c.jigsaw || time.Now().After(c.expires) {
+		return 0, false
+	}
+	return c.seed, true
+}
+
+func (s *sliderChallengeStore) consumeJigsaw(id string, a, b int, minSolve time.Duration) sliderConsumeResult {
+	s.mu.Lock()
+	c, ok := s.challenges[id]
+	if ok && c.jigsaw {
+		delete(s.challenges, id)
+	}
+	s.mu.Unlock()
+	now := time.Now()
+	if !ok || !c.jigsaw || now.After(c.expires) {
+		return sliderConsumeResult{}
+	}
+	res := sliderConsumeResult{ok: c.answer == jigsawPair(a, b)}
+	if minSolve > 0 && now.Sub(c.issued) < minSolve {
+		res.ok = false
+		res.tooFast = true
+	}
+	return res
+}
+
+func (s *sliderChallengeStore) issueTimed() (string, error) {
+	return s.add(sliderChallenge{timed: true})
+}
+
+func (s *sliderChallengeStore) add(c sliderChallenge) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
@@ -167,8 +219,64 @@ func (s *sliderChallengeStore) issue(answer int) (string, error) {
 			return "", errors.New("slider: too many pending challenges")
 		}
 	}
-	s.challenges[id] = sliderChallenge{answer: answer, expires: now.Add(s.ttl), issued: now}
+	c.expires, c.issued = now.Add(s.ttl), now
+	s.challenges[id] = c
 	return id, nil
+}
+
+type sliderCheck struct {
+	ID      string
+	Seed    int64
+	Value   int
+	Left    int
+	InPlace bool
+}
+
+func (s *sliderChallengeStore) check(id string, value, tolerance int) *sliderCheck {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.challenges[id]
+	if !ok || c.timed || c.jigsaw || time.Now().After(c.expires) {
+		return nil
+	}
+	res := &sliderCheck{ID: id, Seed: c.seed, Value: value}
+	if c.checks >= sliderCheckLimit {
+		return res
+	}
+	c.checks++
+	s.challenges[id] = c
+	diff := value - c.answer
+	if diff < 0 {
+		diff = -diff
+	}
+	res.InPlace = diff <= tolerance
+	res.Left = sliderCheckLimit - c.checks
+	return res
+}
+
+func (s *sliderChallengeStore) timedRemaining(id string, wait time.Duration) (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.timedRemainingLocked(id, wait)
+}
+
+func (s *sliderChallengeStore) timedRemainingLocked(id string, wait time.Duration) (time.Duration, bool) {
+	c, ok := s.challenges[id]
+	now := time.Now()
+	if !ok || !c.timed || now.After(c.expires) {
+		return 0, false
+	}
+	return wait - now.Sub(c.issued), true
+}
+
+func (s *sliderChallengeStore) consumeTimed(id string, wait time.Duration) (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	remaining, ok := s.timedRemainingLocked(id, wait)
+	if ok && remaining <= 0 {
+		delete(s.challenges, id)
+	}
+	return remaining, ok
 }
 
 func (s *sliderChallengeStore) consume(id string, value, tolerance int, minSolve time.Duration) sliderConsumeResult {
@@ -179,7 +287,7 @@ func (s *sliderChallengeStore) consume(id string, value, tolerance int, minSolve
 	c, ok := s.challenges[id]
 	delete(s.challenges, id)
 	s.mu.Unlock()
-	if !ok {
+	if !ok || c.timed || c.jigsaw {
 		return sliderConsumeResult{}
 	}
 	now := time.Now()
@@ -250,19 +358,23 @@ type sliderChallengeData struct {
 	PiecePct     string
 	Max          int
 	Answer       int
+	Seed         int64
 	Width        int
 	Height       int
 }
 
 func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
-	w := cfg.Slider.Width
-	h := cfg.Slider.Height
-
 	var seed [8]byte
 	if _, err := rand.Read(seed[:]); err != nil {
 		return nil, err
 	}
-	rng := mrand.New(mrand.NewSource(int64(binary.BigEndian.Uint64(seed[:]))))
+	return buildSliderFromSeed(cfg, int64(binary.BigEndian.Uint64(seed[:])))
+}
+
+func buildSliderFromSeed(cfg *Config, seed int64) (*sliderChallengeData, error) {
+	w := cfg.Slider.Width
+	h := cfg.Slider.Height
+	rng := mrand.New(mrand.NewSource(seed))
 
 	w += rng.Intn(81)
 	h += rng.Intn(41)
@@ -297,7 +409,8 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 
 	sep := pieceTotal + 12
 	placed := []int{answer}
-	nDecoys := 1 + rng.Intn(2)
+	nDecoys := 2 + rng.Intn(2)
+	sameDecoyIdx := rng.Intn(nDecoys)
 	for i := 0; i < nDecoys; i++ {
 		dx := placeDecoy(w, pieceTotal, placed, sep, rng)
 		if dx < 0 {
@@ -305,11 +418,14 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 		}
 		placed = append(placed, dx)
 		ds := tabShape(rng.Intn(int(shapeCount)))
+		if i == sameDecoyIdx {
+			ds = shape
+		}
 		drawTargetBand(bg, dx, pieceW, tabR, h, ds, rng)
 	}
 
 	drawTargetBand(bg, answer, pieceW, tabR, h, shape, rng)
-	piece := drawPiece(scene, answer, pieceW, tabR, h, shape)
+	piece := drawPiece(scene, answer, pieceW, tabR, h, shape, rng)
 
 	bgURI, err := pngDataURI(bg)
 	if err != nil {
@@ -332,6 +448,7 @@ func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
 		PiecePct:     fmtFloat(piecePct),
 		Max:          max,
 		Answer:       answer,
+		Seed:         seed,
 		Width:        w,
 		Height:       h,
 	}, nil
@@ -391,26 +508,29 @@ func drawTargetBand(img *image.RGBA, x0, pieceW, tabR, h int, shape tabShape, rn
 		}
 	}
 
-	dash := color.RGBA{255, 255, 255, 190}
-	dashLen := 6
+	dashLen := 4 + rng.Intn(4)
+	dashAlpha := uint8(160 + rng.Intn(50))
+	dashColor := color.RGBA{uint8(220 + rng.Intn(35)), uint8(220 + rng.Intn(35)), uint8(220 + rng.Intn(35)), dashAlpha}
+
 	for y := 0; y < h; y++ {
 		if (y/dashLen)%2 == 0 {
-			setPx(img, x0, y, dash)
+			setPx(img, x0, y, dashColor)
 			if x0+pieceW < w {
-				setPx(img, x0+pieceW-1, y, dash)
+				setPx(img, x0+pieceW-1, y, dashColor)
 			}
 		}
 	}
 	for x := x0; x < x0+pieceW; x++ {
 		if (x/dashLen)%2 == 0 {
-			setPx(img, x, 0, dash)
+			setPx(img, x, 0, dashColor)
 			if h > 1 {
-				setPx(img, x, h-1, dash)
+				setPx(img, x, h-1, dashColor)
 			}
 		}
 	}
 
-	notch := color.RGBA{0, 0, 0, 255}
+	notchAlpha := uint8(220 + rng.Intn(35))
+	notch := color.RGBA{0, 0, 0, notchAlpha}
 	tabCX := x0 + pieceW
 	for dy := -tabR - 1; dy <= tabR+1; dy++ {
 		for dx := 0; dx <= tabR+1; dx++ {
@@ -421,17 +541,36 @@ func drawTargetBand(img *image.RGBA, x0, pieceW, tabR, h int, shape tabShape, rn
 	}
 }
 
-func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int, shape tabShape) *image.RGBA {
+func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int, shape tabShape, rng *mrand.Rand) *image.RGBA {
 	w := scene.Bounds().Dx()
 	pieceTotal := pieceW + tabR
 	p := image.NewRGBA(image.Rect(0, 0, pieceTotal, h))
+
+	shiftR := rng.Intn(7) - 3
+	shiftG := rng.Intn(7) - 3
+	shiftB := rng.Intn(7) - 3
 
 	extract := func(px, py int) bool {
 		sx, sy := x0+px, py
 		if sx < 0 || sx >= w || sy < 0 || sy >= h {
 			return false
 		}
-		p.SetRGBA(px, py, scene.At(sx, sy).(color.RGBA))
+		c := scene.At(sx, sy).(color.RGBA)
+		clamp := func(v int) uint8 {
+			if v < 0 {
+				return 0
+			}
+			if v > 255 {
+				return 255
+			}
+			return uint8(v)
+		}
+		p.SetRGBA(px, py, color.RGBA{
+			R: clamp(int(c.R) + shiftR),
+			G: clamp(int(c.G) + shiftG),
+			B: clamp(int(c.B) + shiftB),
+			A: c.A,
+		})
 		return true
 	}
 
@@ -448,7 +587,7 @@ func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int, shape tabShape) *imag
 		}
 	}
 
-	border := color.RGBA{0, 0, 0, 200}
+	border := color.RGBA{255, 255, 255, 230}
 	for dy := 0; dy < h; dy++ {
 		setPx(p, 0, dy, border)
 		setPx(p, pieceW-1, dy, border)
@@ -472,6 +611,147 @@ func drawPiece(scene *image.RGBA, x0, pieceW, tabR, h int, shape tabShape) *imag
 	}
 
 	return p
+}
+
+var (
+	soundCorrect = buildSound(0.45, func(t float64) float64 {
+		env := math.Exp(-t / 0.11)
+		return env * (math.Sin(2*math.Pi*1319*t) + 0.45*math.Sin(2*math.Pi*2637*t+1.2*math.Exp(-t/0.05)) + 0.2*math.Sin(2*math.Pi*4186*t)*math.Exp(-t/0.04))
+	})
+	soundWrong = buildSound(0.55, func(t float64) float64 {
+		env := math.Min(t/0.012, 1) * math.Exp(-t/0.17)
+		tone := func(hz float64) float64 {
+			return math.Sin(2*math.Pi*hz*t + 0.9*math.Exp(-t/0.1)*math.Sin(2*math.Pi*2*hz*t))
+		}
+		return env * (tone(185) + 0.8*tone(233) + 0.7*tone(277))
+	})
+)
+
+func buildSound(seconds float64, wave func(t float64) float64) string {
+	const rate = 16000
+	samples := make([]float64, int(seconds*rate))
+	peak := 0.0
+	for i := range samples {
+		samples[i] = wave(float64(i) / rate)
+		peak = math.Max(peak, math.Abs(samples[i]))
+	}
+	pcm := make([]int16, len(samples))
+	for i, v := range samples {
+		fade := math.Min(float64(len(samples)-i)/(0.02*rate), 1)
+		pcm[i] = int16(16000 * fade * v / peak)
+	}
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(36+len(pcm)*2))
+	buf.WriteString("WAVEfmt ")
+	for _, v := range []any{uint32(16), uint16(1), uint16(1), uint32(rate), uint32(rate * 2), uint16(2), uint16(16)} {
+		_ = binary.Write(&buf, binary.LittleEndian, v)
+	}
+	buf.WriteString("data")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(pcm)*2))
+	_ = binary.Write(&buf, binary.LittleEndian, pcm)
+	return "data:audio/wav;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func jigsawPair(a, b int) int {
+	if a > b {
+		a, b = b, a
+	}
+	return a*9 + b
+}
+
+type jigsawChallenge struct {
+	ImageURI string
+	A, B     int
+	Seed     int64
+}
+
+func jigsawSwap(src *image.RGBA, a, b int) *image.RGBA {
+	out := cloneRGBA(src)
+	ax, ay, bx, by := (a%3)*jigsawTileSize, (a/3)*jigsawTileSize, (b%3)*jigsawTileSize, (b/3)*jigsawTileSize
+	for y := 0; y < jigsawTileSize; y++ {
+		for x := 0; x < jigsawTileSize; x++ {
+			out.SetRGBA(ax+x, ay+y, src.RGBAAt(bx+x, by+y))
+			out.SetRGBA(bx+x, by+y, src.RGBAAt(ax+x, ay+y))
+		}
+	}
+	return out
+}
+
+func jigsawSeamCost(img *image.RGBA) float64 {
+	lum := func(x, y int) float64 {
+		c := img.RGBAAt(x, y)
+		return 0.3*float64(c.R) + 0.59*float64(c.G) + 0.11*float64(c.B)
+	}
+	cost := 0.0
+	for _, seam := range []int{jigsawTileSize, 2 * jigsawTileSize} {
+		for i := 0; i < 3*jigsawTileSize; i++ {
+			cost += math.Abs(lum(seam-1, i)-lum(seam, i)) + math.Abs(lum(i, seam-1)-lum(i, seam))
+		}
+	}
+	return cost
+}
+
+func drawJigsawScene(rng *mrand.Rand) *image.RGBA {
+	size := 3 * jigsawTileSize
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	palettes := [][2]color.RGBA{
+		{{22, 44, 92, 255}, {120, 62, 130, 255}},
+		{{16, 70, 86, 255}, {150, 110, 60, 255}},
+		{{70, 30, 80, 255}, {30, 110, 120, 255}},
+		{{30, 60, 50, 255}, {140, 80, 90, 255}},
+	}
+	p := palettes[rng.Intn(len(palettes))]
+	dx, dy := rng.Float64(), rng.Float64()
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			t := (dx*float64(x) + dy*float64(y)) / ((dx + dy) * float64(size))
+			img.SetRGBA(x, y, lerpColor(p[0], p[1], t))
+		}
+	}
+	bright := []color.RGBA{{255, 214, 102, 255}, {126, 222, 255, 255}, {255, 255, 255, 255}, {255, 150, 170, 255}, {170, 240, 150, 255}}
+	for i := 0; i < 5; i++ {
+		c := bright[rng.Intn(len(bright))]
+		ringCircle(img, rng.Intn(size), rng.Intn(size), 70+rng.Intn(120), 8, c)
+	}
+	for i := 0; i < 9; i++ {
+		c := bright[rng.Intn(len(bright))]
+		fillCircle(img, rng.Intn(size), rng.Intn(size), 10+rng.Intn(14), c)
+	}
+	return img
+}
+
+func buildJigsawChallenge() (*jigsawChallenge, error) {
+	var seed [8]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return nil, err
+	}
+	return buildJigsawFromSeed(int64(binary.BigEndian.Uint64(seed[:])))
+}
+
+func buildJigsawFromSeed(seed int64) (*jigsawChallenge, error) {
+	rng := mrand.New(mrand.NewSource(seed))
+	scene := drawJigsawScene(rng)
+	base := jigsawSeamCost(scene)
+	var swapped *image.RGBA
+	bestGain, bestA, bestB := math.Inf(-1), 0, 1
+	for try := 0; try < 24; try++ {
+		a := rng.Intn(9)
+		b := (a + 1 + rng.Intn(8)) % 9
+		candidate := jigsawSwap(scene, a, b)
+		gain := jigsawSeamCost(candidate) - base
+		if gain > bestGain {
+			swapped, bestGain, bestA, bestB = candidate, gain, a, b
+		}
+		if gain >= jigsawMinSeam {
+			break
+		}
+	}
+	uri, err := pngDataURI(swapped)
+	if err != nil {
+		return nil, err
+	}
+	return &jigsawChallenge{ImageURI: uri, A: bestA, B: bestB, Seed: seed}, nil
 }
 
 func pngDataURI(img image.Image) (string, error) {
@@ -575,6 +855,23 @@ func drawScene(w, h int, rng *mrand.Rand) *image.RGBA {
 	}
 	for i := 0; i < 4; i++ {
 		drawTrack(img, rng.Intn(w), rng.Intn(h), 8+rng.Intn(14), trackColors[rng.Intn(len(trackColors))])
+	}
+
+	waveColors := []color.RGBA{
+		{70, 95, 140, 60},
+		{110, 80, 150, 50},
+	}
+	for i := 0; i < 2; i++ {
+		freq := 0.03 + rng.Float64()*0.04
+		phase := rng.Float64() * math.Pi * 2
+		amp := float64(h) / float64(5+rng.Intn(4))
+		baseY := float64(h/4 + rng.Intn(h/2))
+		c := waveColors[i%len(waveColors)]
+		for x := 0; x < w; x++ {
+			wy := int(baseY + math.Sin(float64(x)*freq+phase)*amp)
+			setPx(img, x, wy, c)
+			setPx(img, x, wy+1, c)
+		}
 	}
 
 	return img
