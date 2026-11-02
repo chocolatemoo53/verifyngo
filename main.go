@@ -784,17 +784,35 @@ func handleVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Sto
 	finishVerify(w, r, returnTo)
 }
 
+func sliderClick(r *http.Request) (x, y float64, width int, ok bool) {
+	for _, candidate := range sliderSpotWidths {
+		name := "spot" + strconv.Itoa(candidate)
+		cx, errX := strconv.ParseFloat(r.PostFormValue(name+".x"), 64)
+		cy, errY := strconv.ParseFloat(r.PostFormValue(name+".y"), 64)
+		if errX == nil && errY == nil && cx >= 0 && cy >= 0 && cx <= float64(candidate) {
+			return cx, cy, candidate, true
+		}
+	}
+	return 0, 0, 0, false
+}
+
 func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo string) {
 	ipStr := ip.String()
 	captchaID := r.FormValue("captcha_id")
-	answerStr := r.FormValue("answer")
-	answer, err := strconv.Atoi(answerStr)
-	if err != nil || answer < 0 || answer > 1500 {
+	x, y, shown, clicked := sliderClick(r)
+	if clicked && x == 0 && y == 0 {
+		store.IncrWalkaway("load:"+ipStr, cfg.Walkaway.TTL.Duration)
+		serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "This puzzle needs a mouse or touch. Other options are below.", false)
+		return
+	}
+	natural := cfg.sliderChallenges.spotWidth(captchaID)
+	if !clicked || natural == 0 {
 		metricChallenges.WithLabelValues("slider", "failed").Inc()
-		log.Printf("slider verify failed ip=%s id=%v answer=%q", logIP(cfg, ip), captchaID, sanitizeForLog(answerStr))
+		log.Printf("slider verify failed ip=%s id=%v", logIP(cfg, ip), sanitizeForLog(captchaID))
 		retryChallenge(w, r, cfg, store, ip, returnTo, penaltyFailed)
 		return
 	}
+	answer := int(x * float64(natural) / float64(shown))
 
 	maxAttempts := sliderVerifyMaxPerMin
 	if sharedTorIP(torKind(r, cfg, ip), ip) {
@@ -807,18 +825,7 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 		return
 	}
 
-	if r.PostFormValue("check") != "" {
-		check := cfg.sliderChallenges.check(captchaID, answer, cfg.Slider.Tolerance)
-		if check == nil {
-			serveChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "That puzzle expired. Here is a new one.", false)
-			return
-		}
-		metricChallenges.WithLabelValues("slider", "checked").Inc()
-		renderChallenge(w, r, cfg, cfg.Cap.APIURL, logIP(cfg, ip), returnTo, "", false, check)
-		return
-	}
-
-	res := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance, cfg.Slider.MinSolveTime.Duration)
+	res := cfg.sliderChallenges.consume(captchaID, answer, cfg.Slider.Tolerance/2, cfg.Slider.MinSolveTime.Duration)
 	lowVariance := cfg.sliderChallenges.recordAnswer(ipStr, answer, sliderAnswerSamples, cfg.Slider.Tolerance, sliderAnswerWindow)
 
 	if res.tooFast {
@@ -846,7 +853,7 @@ func handleSliderVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
 	log.Printf("redirecting ip=%s to %s", logIP(cfg, ip), sanitizeForLog(returnTo))
-	finishVerify(w, r, returnTo)
+	finishPuzzle(w, r, cfg, returnTo)
 }
 
 func handleJigsawVerify(w http.ResponseWriter, r *http.Request, cfg *Config, store Store, ip net.IP, returnTo string) {
@@ -893,7 +900,7 @@ func handleJigsawVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 	resetWalkaways(store, r, cfg, ip)
 	setVerifiedCookie(w, r, cfg)
 	clearPassiveCookie(w, r, cfg)
-	finishVerify(w, r, returnTo)
+	finishPuzzle(w, r, cfg, returnTo)
 }
 
 func troubleTokenAt(r *http.Request, cfg *Config, at time.Time) string {

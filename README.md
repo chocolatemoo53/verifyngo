@@ -81,9 +81,13 @@ Each network (/24 for IPv4, /48 for IPv6) can get at most `progressive.max_reque
 
 When a form POST is challenged, such as a SearXNG search, its fields are carried through the challenge. After it is solved, the browser sends the same POST again, automatically with JavaScript or with a Continue button without it. This covers same-origin `application/x-www-form-urlencoded` forms up to 16 KB. Cross-site POSTs, file uploads, and JSON bodies are not carried, and switching captcha provider drops the fields.
 
-## Checking the slider position
+## Click-the-slot puzzle
 
-The slider has a Check position button that works without JavaScript. The server redraws the same puzzle and says whether the piece is in place, in large text and with a click sound where the browser allows it. Each puzzle allows 3 checks, and a check does not count as a failed attempt.
+The slider puzzle shows a piece and a picture with marked slots, and the visitor clicks the slot the piece fits. It uses a native image button, so it needs no JavaScript and the click position is handled on the server. Agents that act on page elements rather than screen coordinates can only click the center of the image, and the correct slot never covers the center. `slider.tolerance` sets how forgiving a click is: half of it is allowed outside the slot.
+
+Where JavaScript runs, visitors can also drag the piece onto the slot. The drop is sent as the same position a click would send, so the answer never reaches the browser.
+
+A keyboard cannot choose a position inside an image, so keyboard users are pointed to the other options. A script that analyzes the picture can still solve it, so this is a barrier to general agents rather than targeted bots.
 
 ## Tile puzzle
 

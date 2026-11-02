@@ -114,3 +114,43 @@ func finishVerify(w http.ResponseWriter, r *http.Request, returnTo string) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'nonce-"+nonce+"'; style-src 'nonce-"+nonce+"'; form-action 'self'; frame-ancestors 'none'")
 	_ = resubmitTpl.Execute(w, map[string]interface{}{"Action": returnTo, "Fields": fields, "Nonce": nonce})
 }
+
+var correctTpl = template.Must(template.New("correct").Parse(`<!doctype html>
+<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{{if not .Fields}}<meta http-equiv="refresh" content="1;url={{.Action}}">{{end}}
+<title>That's correct.</title>
+<style nonce="{{.Nonce}}">body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;text-align:center;background:{{.Background}};color:{{.Text}}}a{color:inherit}button{font:inherit;padding:.6em 1.4em;cursor:pointer}</style>
+</head><body>
+<main>
+<p role="status">That's correct.</p>
+<audio autoplay src="{{.Sound}}"></audio>
+{{if .Fields}}<form id="resubmit" method="POST" action="{{.Action}}">
+{{range .Fields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end}}<button type="submit">Continue</button>
+</form>
+<script nonce="{{.Nonce}}">setTimeout(function(){document.getElementById('resubmit').submit();},900);</script>
+{{else}}<a href="{{.Action}}">Continue</a>{{end}}
+</main>
+</body></html>`))
+
+func finishPuzzle(w http.ResponseWriter, r *http.Request, cfg *Config, returnTo string) {
+	nonce, err := cspNonce()
+	if err != nil {
+		finishVerify(w, r, returnTo)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; media-src data:; script-src 'nonce-"+nonce+"'; style-src 'nonce-"+nonce+"'; form-action 'self'; frame-ancestors 'none'")
+	_ = correctTpl.Execute(w, map[string]interface{}{
+		"Action":     returnTo,
+		"Fields":     replayFields(replayValues(r)),
+		"Nonce":      nonce,
+		"Sound":      template.URL(soundCorrect),
+		"Lang":       cfg.Branding.Lang,
+		"Background": template.CSS(cfg.Branding.BackgroundColor),
+		"Text":       template.CSS(cfg.Branding.TextColor),
+	})
+}

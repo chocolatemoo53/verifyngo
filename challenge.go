@@ -28,13 +28,15 @@ func requestID() string {
 
 const tryAgainMessage = "Try again."
 
+var sliderSpotWidths = []int{220, 280, 420}
+
 const trapHTML = `<div hidden aria-hidden="true"><a href="/__cp_trap" rel="nofollow" tabindex="-1">Directory Index</a></div>`
 
 const challengeTpl = `<!DOCTYPE html>
 <html lang="{{.Lang}}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{if .ErrorMsg}}Error: {{end}}{{if .SliderCheckMsg}}{{.SliderCheckMsg}} {{end}}{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
+<title>{{if .ErrorMsg}}Error: {{end}}{{if .Title}}{{.Title}}{{else}}Verifying...{{end}}</title>
 {{if .SliderSwitchURL}}<noscript><meta http-equiv="refresh" content="2;url={{.SliderSwitchURL}}"></noscript>{{end}}
 {{if .WaitRefreshURL}}<meta http-equiv="refresh" content="{{.TimedRemaining}};url={{.WaitRefreshURL}}">{{end}}
 {{if .Nonce}}
@@ -175,22 +177,25 @@ const challengeTpl = `<!DOCTYPE html>
     margin-top: 0.75rem;
     font-size: 0.9rem;
     color: var(--cp-text);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
   }
   .verifyngo-switch-label {
-    margin-right: 0.25rem;
+    display: block;
+    margin-bottom: 0.5rem;
+    text-align: center;
+  }
+  .verifyngo-switch-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+    gap: 0.5rem;
   }
   .verifyngo-switch-current,
   .verifyngo-switch a,
   .verifyngo-switch a:visited {
-    display: inline-block;
-    min-width: 5.5rem;
-    padding: 0.3rem 0.6rem;
-    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.35rem 0.3rem;
+    border-radius: 12px;
     text-align: center;
     text-transform: uppercase;
     font-size: 0.75rem;
@@ -291,22 +296,6 @@ const challengeTpl = `<!DOCTYPE html>
       animation: verifyngo-reveal 0s linear {{.TroubleDelaySeconds}}s forwards;
     }
   }
-  .verifyngo-secondary {
-    margin-inline: 0.25rem;
-    color: var(--cp-text);
-    background: transparent;
-    border: 2px solid var(--cp-accent);
-  }
-  .verifyngo-check {
-    font-size: 1.15rem;
-    font-weight: 700;
-    margin: 0 0 1rem;
-  }
-  .verifyngo-check-ok {
-    padding: 0.6rem 1rem;
-    border: 3px solid var(--cp-accent);
-    border-radius: 8px;
-  }
   .verifyngo-alert {
     background: rgba(220, 53, 69, 0.15);
     border: 1px solid #dc3545;
@@ -332,6 +321,9 @@ const challengeTpl = `<!DOCTYPE html>
     {{if .CapCheckmark}}--cap-checkmark: {{.CapCheckmark}};{{end}}
   }
   @media (max-width: 380px) {
+    .verifyngo-switch-current,
+    .verifyngo-switch a,
+    .verifyngo-switch a:visited { font-size: 0.68rem; letter-spacing: 0; }
     main.verifyngo-card { padding: 1.5rem 1.25rem; border-radius: 10px; }
     .verifyngo-title { font-size: 1.2rem; }
     .verifyngo-status { font-size: 0.9rem; }
@@ -385,86 +377,113 @@ const challengeTpl = `<!DOCTYPE html>
   {{else if eq .Provider "slider"}}
   <style nonce="{{.Nonce}}">
     .verifyngo-slider {
-      position: relative;
-      width: 100%;
+      --spot-width: 280px;
+      width: var(--spot-width);
       margin: 0 auto;
-      border-radius: 10px;
-      overflow: hidden;
     }
-    .verifyngo-slider-img {
+    .verifyngo-piece-panel {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      padding: 0.6rem;
+      margin-bottom: 0.75rem;
+      border: 2px solid var(--cp-accent);
+      border-radius: 10px;
+    }
+    .verifyngo-piece {
       display: block;
-      width: 100%;
+      flex: none;
+      width: calc(var(--spot-width) * {{.SliderPiecePct}} / 100);
       height: auto;
     }
-    .verifyngo-range {
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 100%;
-      height: 100%;
+    .verifyngo-piece-drag {
+      position: relative;
+      z-index: 2;
+      touch-action: none;
+      cursor: grab;
+    }
+    .verifyngo-piece-drag:active { cursor: grabbing; }
+    .verifyngo-piece-panel .verifyngo-status {
       margin: 0;
-      -webkit-appearance: none;
-      appearance: none;
-      background: transparent;
+      font-size: 1.05rem;
+      text-align: left;
+    }
+    .verifyngo-spot {
+      display: none;
+      width: 100%;
+      height: auto;
+      padding: 0;
+      border-radius: 10px;
       cursor: pointer;
     }
-    .verifyngo-range:focus-visible {
-      outline: 3px solid {{.AccentColor}};
-      outline: 3px solid var(--cp-accent);
-      outline-offset: -3px;
+    .verifyngo-spot-280 { display: block; }
+    @media (max-width: 359px) {
+      .verifyngo-slider { --spot-width: 220px; }
+      .verifyngo-spot-280 { display: none; }
+      .verifyngo-spot-220 { display: block; }
     }
-    .verifyngo-range::-webkit-slider-runnable-track {
-      height: 100%;
-      background: transparent;
-    }
-    .verifyngo-range::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      height: 100%;
-      width: {{.SliderPiecePct}}%;
-      background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
-    }
-    .verifyngo-range::-moz-range-track {
-      height: 100%;
-      background: transparent;
-    }
-    .verifyngo-range::-moz-range-thumb {
-      height: 100%;
-      width: {{.SliderPiecePct}}%;
-      border: none;
-      border-radius: 0;
-      background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
-    }
-    .verifyngo-range::-ms-track {
-      height: 100%;
-      background: transparent;
-      border-color: transparent;
-      color: transparent;
-    }
-    .verifyngo-range::-ms-fill-lower,
-    .verifyngo-range::-ms-fill-upper {
-      background: transparent;
-    }
-    .verifyngo-range::-ms-thumb {
-      height: 100%;
-      width: {{.SliderPiecePct}}%;
-      border: none;
-      border-radius: 0;
-      background: url("{{.SliderPiece}}") no-repeat center/100% 100%;
+    @media (min-width: 520px) {
+      .verifyngo-slider { --spot-width: 420px; }
+      .verifyngo-spot-280 { display: none; }
+      .verifyngo-spot-420 { display: block; }
     }
   </style>
   <form id="slider-form" method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
     <input type="hidden" name="captcha_id" value="{{.SliderChallengeID}}">
     {{template "replay" .}}
-    <p id="slider-desc" class="verifyngo-status">Slide the piece into the slot.</p>
-    {{if .SliderCheckMsg}}<p class="verifyngo-check{{if .SliderInPlace}} verifyngo-check-ok{{end}}" role="status">{{.SliderCheckMsg}}</p>{{end}}
     <div class="verifyngo-slider">
-      <img class="verifyngo-slider-img" src="{{.SliderBg}}" alt="Puzzle canvas with marked target slot">
-      <input type="range" id="slider-input" class="verifyngo-range" name="answer" min="0" max="{{.SliderMax}}" step="{{.SliderStep}}" value="{{.SliderValue}}" aria-label="Puzzle piece position" aria-describedby="slider-desc"{{if .SliderCheckAgain}} autofocus{{end}}>
+      <div class="verifyngo-piece-panel">
+        <img class="verifyngo-piece" src="{{.SliderPiece}}" alt="Puzzle piece">
+        <p id="slider-desc" class="verifyngo-status">Click the slot this piece fits.</p>
+      </div>
+      {{range .SliderSpots}}<input type="image" class="verifyngo-spot verifyngo-spot-{{.}}" name="spot{{.}}" src="{{$.SliderBg}}" alt="Picture with marked slots" aria-describedby="slider-desc">
+      {{end}}
     </div>
-    <button type="submit" class="verifyngo-submit"{{if .SliderInPlace}} autofocus{{end}}>Verify</button>
-    {{if .SliderCanCheck}}<button type="submit" name="check" value="1" class="verifyngo-submit verifyngo-secondary">Check position</button>{{end}}
   </form>
+  <script nonce="{{.Nonce}}">
+    (function () {
+      var piece = document.querySelector('.verifyngo-piece');
+      var form = document.getElementById('slider-form');
+      if (!piece || !form || !window.PointerEvent) return;
+      var startX = 0, startY = 0, dragging = false;
+      piece.classList.add('verifyngo-piece-drag');
+      document.getElementById('slider-desc').textContent = 'Click the slot this piece fits, or drag the piece onto it.';
+      piece.addEventListener('dragstart', function (e) { e.preventDefault(); });
+      piece.addEventListener('pointerdown', function (e) {
+        dragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        piece.setPointerCapture(e.pointerId);
+      });
+      piece.addEventListener('pointermove', function (e) {
+        if (dragging) piece.style.transform = 'translate(' + (e.clientX - startX) + 'px,' + (e.clientY - startY) + 'px)';
+      });
+      piece.addEventListener('pointercancel', function () {
+        dragging = false;
+        piece.style.transform = '';
+      });
+      piece.addEventListener('pointerup', function () {
+        if (!dragging) return;
+        dragging = false;
+        var spot = Array.prototype.filter.call(form.querySelectorAll('input[type=image]'), function (i) { return i.offsetParent !== null; })[0];
+        var p = piece.getBoundingClientRect();
+        var b = spot.getBoundingClientRect();
+        var x = Math.round(p.left + p.width / 3 - b.left);
+        var y = Math.round(p.top + p.height / 2 - b.top);
+        piece.style.transform = '';
+        if (x <= 0 || y < 0 || x > b.width || y > b.height) return;
+        [['x', x], ['y', y]].forEach(function (pair) {
+          var input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = spot.name + '.' + pair[0];
+          input.value = pair[1];
+          form.appendChild(input);
+        });
+        form.submit();
+      });
+    })();
+  </script>
   {{else if eq .Provider "jigsaw"}}
   <form id="jigsaw-form" method="POST" action="/__verify">
     <input type="hidden" name="return_to" value="{{.ReturnTo}}">
@@ -574,21 +593,6 @@ func providerDisplayName(p string) string {
 }
 
 func serveChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL, ip, requestURI, errorMsg string, logServed bool) {
-	renderChallenge(w, r, cfg, apiURL, ip, requestURI, errorMsg, logServed, nil)
-}
-
-func sliderCheckMessage(check *sliderCheck) string {
-	switch {
-	case check == nil:
-		return ""
-	case check.InPlace:
-		return "That's correct."
-	default:
-		return "Try again."
-	}
-}
-
-func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL, ip, requestURI, errorMsg string, logServed bool, check *sliderCheck) {
 	id := requestID()
 	if logServed {
 		log.Printf("challenge served id=%s ip=%s path=%s", id, ip, requestURI)
@@ -605,7 +609,7 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 	available := availableProviders(cfg)
 	if len(available) > 1 {
 		var b strings.Builder
-		b.WriteString("<div class=\"verifyngo-switch\"><span class=\"verifyngo-switch-label\">Choose how to verify:</span>")
+		b.WriteString("<div class=\"verifyngo-switch\"><span class=\"verifyngo-switch-label\">Choose how to verify:</span><div class=\"verifyngo-switch-options\">")
 		for _, p := range available {
 			label := providerDisplayName(p)
 			if p == provider {
@@ -625,7 +629,7 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 				b.WriteString("</a>")
 			}
 		}
-		b.WriteString("</div>")
+		b.WriteString("</div></div>")
 		switcher = template.HTML(b.String())
 	}
 
@@ -646,8 +650,6 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 	sliderBg := ""
 	sliderPiece := ""
 	sliderPiecePct := ""
-	sliderMax := 0
-	sliderWidth := cfg.Slider.Width
 	timedRemaining := int(timedWait / time.Second)
 	if provider == "timed" {
 		id := r.FormValue("captcha_id")
@@ -659,10 +661,6 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 		} else {
 			sliderID = challengeID
 		}
-	}
-	sliderValue := 0
-	if check != nil {
-		sliderValue = check.Value
 	}
 	jigsawImage := ""
 	var jigsawTiles []jigsawTile
@@ -700,10 +698,7 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 		}
 	}
 	sound := ""
-	switch {
-	case check != nil && check.InPlace:
-		sound = soundCorrect
-	case check != nil || errorMsg == tryAgainMessage:
+	if errorMsg == tryAgainMessage {
 		sound = soundWrong
 	}
 	waitRefreshURL := ""
@@ -714,22 +709,11 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 		}).String()
 	}
 	if provider == "slider" {
-		var data *sliderChallengeData
-		var err error
-		if check != nil {
-			data, err = buildSliderFromSeed(cfg, check.Seed)
-		} else {
-			data, err = buildSliderChallenge(cfg)
-		}
+		data, err := buildSliderChallenge(cfg)
 		if err != nil {
 			log.Printf("slider: build challenge: %v", err)
 		} else {
-			challengeID := ""
-			if check != nil {
-				challengeID = check.ID
-			} else {
-				challengeID, err = cfg.sliderChallenges.issueSlider(data.Answer, data.Seed)
-			}
+			challengeID, err := cfg.sliderChallenges.issueSpot(data.Answer, data.PieceWidth, data.Width)
 			if err != nil {
 				log.Printf("slider: issue challenge: %v", err)
 			} else {
@@ -737,8 +721,6 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 				sliderBg = data.BgDataURI
 				sliderPiece = data.PieceDataURI
 				sliderPiecePct = data.PiecePct
-				sliderMax = data.Max
-				sliderWidth = data.Width
 			}
 		}
 	}
@@ -792,20 +774,13 @@ func renderChallenge(w http.ResponseWriter, r *http.Request, cfg *Config, apiURL
 		"CapCheckmark":        capCheckmark(cfg.Branding.AccentColor),
 		"Nonce":               nonce,
 		"SliderChallengeID":   sliderID,
-		"SliderStep":          max(cfg.Slider.Tolerance, 1),
-		"SliderValue":         sliderValue,
-		"SliderCheckMsg":      sliderCheckMessage(check),
-		"SliderInPlace":       check != nil && check.InPlace,
-		"SliderCheckAgain":    check != nil && !check.InPlace,
-		"SliderCanCheck":      check == nil || (check.Left > 0 && !check.InPlace),
+		"SliderSpots":         sliderSpotWidths,
 		"Sound":               template.URL(sound),
 		"JigsawImage":         template.URL(jigsawImage),
 		"JigsawTiles":         jigsawTiles,
 		"SliderBg":            template.URL(sliderBg),
 		"SliderPiece":         template.URL(sliderPiece),
 		"SliderPiecePct":      sliderPiecePct,
-		"SliderMax":           sliderMax,
-		"SliderWidth":         sliderWidth,
 		"SliderSwitchURL":     sliderSwitchURL,
 	})
 }

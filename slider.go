@@ -21,7 +21,6 @@ const (
 	sliderVerifyMaxPerMin = 12
 	sliderAnswerWindow    = 15 * time.Minute
 	sliderAnswerSamples   = 4
-	sliderCheckLimit      = 3
 	jigsawTileSize        = 120
 	jigsawMinSeam         = 12000.0
 )
@@ -76,7 +75,8 @@ type sliderChallenge struct {
 	timed   bool
 	jigsaw  bool
 	seed    int64
-	checks  int
+	span    int
+	width   int
 	expires time.Time
 	issued  time.Time
 }
@@ -158,8 +158,18 @@ func (s *sliderChallengeStore) issue(answer int) (string, error) {
 	return s.add(sliderChallenge{answer: answer})
 }
 
-func (s *sliderChallengeStore) issueSlider(answer int, seed int64) (string, error) {
-	return s.add(sliderChallenge{answer: answer, seed: seed})
+func (s *sliderChallengeStore) issueSpot(answer, span, width int) (string, error) {
+	return s.add(sliderChallenge{answer: answer, span: span, width: width})
+}
+
+func (s *sliderChallengeStore) spotWidth(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.challenges[id]
+	if !ok || c.timed || c.jigsaw || time.Now().After(c.expires) {
+		return 0
+	}
+	return c.width
 }
 
 func (s *sliderChallengeStore) issueJigsaw(a, b int, seed int64) (string, error) {
@@ -224,36 +234,6 @@ func (s *sliderChallengeStore) add(c sliderChallenge) (string, error) {
 	return id, nil
 }
 
-type sliderCheck struct {
-	ID      string
-	Seed    int64
-	Value   int
-	Left    int
-	InPlace bool
-}
-
-func (s *sliderChallengeStore) check(id string, value, tolerance int) *sliderCheck {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.challenges[id]
-	if !ok || c.timed || c.jigsaw || time.Now().After(c.expires) {
-		return nil
-	}
-	res := &sliderCheck{ID: id, Seed: c.seed, Value: value}
-	if c.checks >= sliderCheckLimit {
-		return res
-	}
-	c.checks++
-	s.challenges[id] = c
-	diff := value - c.answer
-	if diff < 0 {
-		diff = -diff
-	}
-	res.InPlace = diff <= tolerance
-	res.Left = sliderCheckLimit - c.checks
-	return res
-}
-
 func (s *sliderChallengeStore) timedRemaining(id string, wait time.Duration) (time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -294,9 +274,11 @@ func (s *sliderChallengeStore) consume(id string, value, tolerance int, minSolve
 	if now.After(c.expires) {
 		return sliderConsumeResult{}
 	}
-	diff := value - c.answer
-	if diff < 0 {
-		diff = -diff
+	diff := 0
+	if value < c.answer {
+		diff = c.answer - value
+	} else if value > c.answer+c.span {
+		diff = value - c.answer - c.span
 	}
 	res := sliderConsumeResult{ok: diff <= tolerance}
 	if minSolve > 0 && now.Sub(c.issued) < minSolve {
@@ -358,23 +340,19 @@ type sliderChallengeData struct {
 	PiecePct     string
 	Max          int
 	Answer       int
-	Seed         int64
 	Width        int
 	Height       int
 }
 
 func buildSliderChallenge(cfg *Config) (*sliderChallengeData, error) {
+	w := cfg.Slider.Width
+	h := cfg.Slider.Height
+
 	var seed [8]byte
 	if _, err := rand.Read(seed[:]); err != nil {
 		return nil, err
 	}
-	return buildSliderFromSeed(cfg, int64(binary.BigEndian.Uint64(seed[:])))
-}
-
-func buildSliderFromSeed(cfg *Config, seed int64) (*sliderChallengeData, error) {
-	w := cfg.Slider.Width
-	h := cfg.Slider.Height
-	rng := mrand.New(mrand.NewSource(seed))
+	rng := mrand.New(mrand.NewSource(int64(binary.BigEndian.Uint64(seed[:]))))
 
 	w += rng.Intn(81)
 	h += rng.Intn(41)
@@ -399,6 +377,9 @@ func buildSliderFromSeed(cfg *Config, seed int64) (*sliderChallengeData, error) 
 	if max > 0 {
 		if max > tol {
 			answer = tol + 1 + rng.Intn(max-tol)
+			for try := 0; try < 64 && answer-tol <= w/2 && w/2 <= answer+pieceTotal+tol; try++ {
+				answer = tol + 1 + rng.Intn(max-tol)
+			}
 		} else {
 			answer = max
 		}
@@ -448,7 +429,6 @@ func buildSliderFromSeed(cfg *Config, seed int64) (*sliderChallengeData, error) 
 		PiecePct:     fmtFloat(piecePct),
 		Max:          max,
 		Answer:       answer,
-		Seed:         seed,
 		Width:        w,
 		Height:       h,
 	}, nil

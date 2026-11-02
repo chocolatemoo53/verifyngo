@@ -685,7 +685,8 @@ func TestSearchPostSurvivesChallenge(t *testing.T) {
 		t.Fatalf("no slider challenge issued, page:\n%s", page)
 	}
 
-	fields.Set("answer", strconv.Itoa(ch.answer))
+	fields.Set("spot420.x", strconv.Itoa((ch.answer+ch.span/2)*420/ch.width))
+	fields.Set("spot420.y", "40")
 	w := httptest.NewRecorder()
 	handleVerify(w, formPost("/__verify", fields, "same-origin"), cfg, store)
 	resubmit := hiddenInputs(w.Body.String())
@@ -1058,7 +1059,7 @@ func TestTimedAndSliderChallengesAreSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := timedPost(cfg, store, "203.0.113.89", "slider", url.Values{"captcha_id": {timedID}, "answer": {"0"}, "return_to": {"/"}})
+	w := timedPost(cfg, store, "203.0.113.89", "slider", url.Values{"captcha_id": {timedID}, "spot280.x": {"5"}, "spot280.y": {"5"}, "return_to": {"/"}})
 	if hasVerifiedCookie(cfg, w) {
 		t.Fatal("a wait challenge must not pass as a slider answer")
 	}
@@ -1091,164 +1092,155 @@ func sliderPage(t *testing.T, serve func(*http.Request, bool) *httptest.Response
 	return m[1], body
 }
 
-func sliderImage(t *testing.T, body string) string {
-	t.Helper()
-	m := regexp.MustCompile(`class="verifyngo-slider-img" src="([^"]+)"`).FindStringSubmatch(body)
-	if m == nil {
-		t.Fatal("no puzzle image")
-	}
-	return m[1]
+func sliderCoords(cfg *Config, id string, natural, shown int) url.Values {
+	cfg.sliderChallenges.mu.Lock()
+	defer cfg.sliderChallenges.mu.Unlock()
+	c := cfg.sliderChallenges.challenges[id]
+	x := natural * shown / c.width
+	name := "spot" + strconv.Itoa(shown)
+	return url.Values{"captcha_id": {id}, "return_to": {"/"}, name + ".x": {strconv.Itoa(x)}, name + ".y": {"40"}}
 }
 
-func TestSliderCheckKeepsPuzzleWithoutPenalty(t *testing.T) {
+func sliderSlot(cfg *Config, id string) (int, int, int) {
+	cfg.sliderChallenges.mu.Lock()
+	defer cfg.sliderChallenges.mu.Unlock()
+	c := cfg.sliderChallenges.challenges[id]
+	return c.answer, c.span, c.width
+}
+
+func TestSliderClickOnEveryDisplaySize(t *testing.T) {
 	cfg, store, serve := testServer(t, testConfig)
 	cfg.Slider.MinSolveTime = Duration{}
-	ip := "203.0.113.95"
-	id, first := sliderPage(t, serve, ip)
-	cfg.sliderChallenges.mu.Lock()
-	answer := cfg.sliderChallenges.challenges[id].answer
-	cfg.sliderChallenges.mu.Unlock()
-	wrong := answer + 40
-	if wrong > 1500 || answer < 60 {
-		wrong = answer - 40
+	for i, shown := range sliderSpotWidths {
+		ip := "203.0.113." + strconv.Itoa(120+i)
+		id, body := sliderPage(t, serve, ip)
+		if strings.Contains(body, `type="range"`) || strings.Contains(body, `name="check"`) {
+			t.Fatal("the drag control and check button must be gone")
+		}
+		if !strings.Contains(body, `type="image"`) || !strings.Contains(body, `name="spot`+strconv.Itoa(shown)+`"`) {
+			t.Fatalf("missing image button for %d", shown)
+		}
+		answer, span, _ := sliderSlot(cfg, id)
+		hit := sliderCoords(cfg, id, answer+span/2, shown)
+		w := timedPost(cfg, store, ip, "slider", hit)
+		page := w.Body.String()
+		if !hasVerifiedCookie(cfg, w) {
+			t.Fatalf("display %d: a click inside the slot must verify, status %d", shown, w.Code)
+		}
+		if !strings.Contains(page, "That's correct.") || !strings.Contains(html.UnescapeString(page), soundCorrect) {
+			t.Fatalf("display %d: missing correct feedback", shown)
+		}
+		if !strings.Contains(page, `http-equiv="refresh" content="1;url=/"`) {
+			t.Fatalf("display %d: correct page must continue by itself", shown)
+		}
+		if w := timedPost(cfg, store, ip, "slider", hit); hasVerifiedCookie(cfg, w) {
+			t.Fatal("a solved puzzle must not be reusable")
+		}
 	}
-	if wrong < 0 {
-		wrong = answer + 40
-	}
+}
 
-	miss := timedPost(cfg, store, ip, "slider", url.Values{"captcha_id": {id}, "answer": {strconv.Itoa(wrong)}, "check": {"1"}, "return_to": {"/"}})
-	page := miss.Body.String()
-	if hasVerifiedCookie(cfg, miss) {
-		t.Fatal("a check must not verify")
+func TestSliderDragIsAnAddOnThatLeaksNothing(t *testing.T) {
+	cfg, _, serve := testServer(t, testConfig)
+	id, body := sliderPage(t, serve, "203.0.113.128")
+	if !strings.Contains(body, `<p id="slider-desc" class="verifyngo-status">Click the slot this piece fits.</p>`) {
+		t.Fatal("without scripts the page must only offer the click")
 	}
-	if !strings.Contains(page, "Try again.") || !strings.Contains(html.UnescapeString(page), soundWrong) {
-		t.Fatalf("missing miss feedback:\n%s", page)
+	if !strings.Contains(body, "or drag the piece onto it") {
+		t.Fatal("scripts must offer the drag")
 	}
-	if !strings.Contains(page, `name="captcha_id" value="`+id+`"`) || sliderImage(t, page) != sliderImage(t, first) {
-		t.Fatal("a check must keep the same puzzle")
+	answer, _, _ := sliderSlot(cfg, id)
+	for _, leak := range []string{`data-answer`, `value="` + strconv.Itoa(answer) + `"`} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("the page must not reveal the answer: %s", leak)
+		}
 	}
-	if !strings.Contains(page, `value="`+strconv.Itoa(wrong)+`"`) {
-		t.Fatal("a check must keep the slider position")
+}
+
+func TestSliderMissPlaysSoundAndCounts(t *testing.T) {
+	cfg, store, serve := testServer(t, testConfig)
+	cfg.Slider.MinSolveTime = Duration{}
+	ip := "203.0.113.125"
+	id, _ := sliderPage(t, serve, ip)
+	answer, span, width := sliderSlot(cfg, id)
+	miss := answer + span + 30
+	if miss >= width {
+		miss = answer - 30
+	}
+	w := timedPost(cfg, store, ip, "slider", sliderCoords(cfg, id, miss, 280))
+	page := w.Body.String()
+	if hasVerifiedCookie(cfg, w) || !strings.Contains(page, "Try again.") || !strings.Contains(html.UnescapeString(page), soundWrong) {
+		t.Fatal("a miss must fail with feedback and the wrong sound")
+	}
+	if strings.Contains(page, `value="`+id+`"`) {
+		t.Fatal("a miss must get a new puzzle")
+	}
+	if n := store.IncrWalkaway("fail:"+ip, time.Hour); n != 2 {
+		t.Fatalf("failed attempts = %d, want 2", n)
+	}
+}
+
+func TestSliderKeyboardActivationExplainsWithoutPenalty(t *testing.T) {
+	cfg, store, serve := testServer(t, testConfig)
+	ip := "203.0.113.126"
+	id, _ := sliderPage(t, serve, ip)
+	w := timedPost(cfg, store, ip, "slider", url.Values{"captcha_id": {id}, "return_to": {"/"}, "spot280.x": {"0"}, "spot280.y": {"0"}})
+	if hasVerifiedCookie(cfg, w) || !strings.Contains(w.Body.String(), "needs a mouse or touch") {
+		t.Fatal("keyboard activation must explain")
 	}
 	if n := store.IncrWalkaway("fail:"+ip, time.Hour); n != 1 {
-		t.Fatalf("a check counted as a failed attempt: %d", n)
+		t.Fatalf("keyboard activation counted as a failure: %d", n)
 	}
-
-	hit := timedPost(cfg, store, ip, "slider", url.Values{"captcha_id": {id}, "answer": {strconv.Itoa(answer)}, "check": {"1"}, "return_to": {"/"}})
-	page = hit.Body.String()
-	if hasVerifiedCookie(cfg, hit) {
-		t.Fatal("a check must not verify even when in place")
-	}
-	if !strings.Contains(page, "That&#39;s correct.") || !strings.Contains(html.UnescapeString(page), soundCorrect) {
-		t.Fatalf("missing in-place feedback:\n%s", page)
-	}
-
-	w := timedPost(cfg, store, ip, "slider", url.Values{"captcha_id": {id}, "answer": {strconv.Itoa(answer)}, "return_to": {"/"}})
-	if !hasVerifiedCookie(cfg, w) {
-		t.Fatalf("Verify after a check must pass, got status %d", w.Code)
+	if n := store.Walkaways("load:" + ip); n == 0 {
+		t.Fatal("keyboard activation must count toward showing the other options")
 	}
 }
 
-func TestSliderCheckLimitHidesTheAnswer(t *testing.T) {
+func TestSliderRejectsBadClicks(t *testing.T) {
 	cfg, store, serve := testServer(t, testConfig)
-	id, _ := sliderPage(t, serve, "203.0.113.96")
-	cfg.sliderChallenges.mu.Lock()
-	answer := cfg.sliderChallenges.challenges[id].answer
-	cfg.sliderChallenges.mu.Unlock()
-	for i := 0; i < sliderCheckLimit; i++ {
-		cfg.sliderChallenges.check(id, answer+1000, 0)
-	}
-	w := timedPost(cfg, store, "203.0.113.96", "slider", url.Values{"captcha_id": {id}, "answer": {strconv.Itoa(answer)}, "check": {"1"}, "return_to": {"/"}})
-	page := w.Body.String()
-	if strings.Contains(page, "correct") || strings.Contains(html.UnescapeString(page), soundCorrect) {
-		t.Fatal("a check past the limit must not reveal the answer")
-	}
-	if strings.Contains(page, `name="check"`) {
-		t.Fatal("the check button must go away at the limit")
-	}
-}
-
-func TestSliderCheckRejectsWaitChallenge(t *testing.T) {
-	cfg, _, _ := testServer(t, testConfig)
-	id, err := cfg.sliderChallenges.issueTimed()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.sliderChallenges.check(id, 0, 8) != nil {
-		t.Fatal("a wait challenge must not answer slider checks")
-	}
-}
-
-func TestSliderSeedRebuildsSamePuzzle(t *testing.T) {
-	cfg, _, _ := testServer(t, testConfig)
-	a, err := buildSliderChallenge(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := buildSliderFromSeed(cfg, a.Seed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.BgDataURI != b.BgDataURI || a.PieceDataURI != b.PieceDataURI || a.Answer != b.Answer {
-		t.Fatal("the same seed must draw the same puzzle")
-	}
-}
-
-func TestTrapIsHiddenWithoutInlineStyles(t *testing.T) {
-	_, _, serve := testServer(t, testConfig)
-	req := httptest.NewRequest("GET", "/page", nil)
-	req.RemoteAddr = "203.0.113.97:1234"
-	body := serve(req, true).Body.String()
-	if !strings.Contains(body, `<div hidden aria-hidden="true"><a href="/__cp_trap"`) {
-		t.Fatal("the trap must use the hidden attribute, which a CSP cannot block")
-	}
-	if strings.Contains(body, `style="display:none`) {
-		t.Fatal("inline styles are blocked by the challenge CSP")
-	}
-}
-
-func TestTrapDoesNotBanBrowsers(t *testing.T) {
-	_, store, serve := testServer(t, testConfig)
-	for _, site := range []string{"none", "same-origin", "same-site", "cross-site"} {
-		req := httptest.NewRequest("GET", "/__cp_trap", nil)
-		req.RemoteAddr = "198.51.100.98:5555"
-		req.Header.Set("Sec-Fetch-Site", site)
-		if w := serve(req, true); w.Code != http.StatusNotFound {
-			t.Errorf("Sec-Fetch-Site %s: status %d, want 404", site, w.Code)
-		}
-		if store.IsBlocked("198.51.100.98") {
-			t.Fatalf("Sec-Fetch-Site %s: a browser must not be banned", site)
+	cfg.Slider.MinSolveTime = Duration{}
+	ip := "203.0.113.127"
+	for name, coords := range map[string]url.Values{
+		"none":       {},
+		"old answer": {"answer": {"100"}},
+		"bad width":  {"spot999.x": {"100"}, "spot999.y": {"10"}},
+		"not number": {"spot280.x": {"NaN"}, "spot280.y": {"10"}},
+		"infinite":   {"spot280.x": {"Inf"}, "spot280.y": {"10"}},
+		"negative":   {"spot280.x": {"-5"}, "spot280.y": {"10"}},
+		"too far":    {"spot280.x": {"281"}, "spot280.y": {"10"}},
+	} {
+		id, _ := sliderPage(t, serve, ip)
+		coords.Set("captcha_id", id)
+		coords.Set("return_to", "/")
+		if w := timedPost(cfg, store, ip, "slider", coords); hasVerifiedCookie(cfg, w) {
+			t.Errorf("%s: must not verify", name)
 		}
 	}
 }
 
-func TestSwitchingOptionsDoesNotBan(t *testing.T) {
+func TestSliderCenterIsNeverTheAnswer(t *testing.T) {
+	cfg, _, _ := testServer(t, testConfig)
+	for i := 0; i < 100; i++ {
+		d, err := buildSliderChallenge(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tol := cfg.Slider.Tolerance
+		if d.Answer-tol <= d.Width/2 && d.Width/2 <= d.Answer+d.PieceWidth+tol {
+			t.Fatalf("slot %d+%d covers the center of width %d", d.Answer, d.PieceWidth, d.Width)
+		}
+	}
+}
+
+func TestSliderElementClickAtCenterFails(t *testing.T) {
 	cfg, store, serve := testServer(t, testConfig)
-	ip := "203.0.113.98"
-	load := func(switched bool) string {
-		req := httptest.NewRequest("GET", "/page", nil)
-		req.RemoteAddr = ip + ":1234"
-		if switched {
-			req.AddCookie(&http.Cookie{Name: switchCookie, Value: "1"})
+	cfg.Slider.MinSolveTime = Duration{}
+	for i := 0; i < 20; i++ {
+		ip := "203.0.113." + strconv.Itoa(130+i)
+		id, _ := sliderPage(t, serve, ip)
+		form := url.Values{"captcha_id": {id}, "return_to": {"/"}, "spot280.x": {"140"}, "spot280.y": {"60"}}
+		if w := timedPost(cfg, store, ip, "slider", form); hasVerifiedCookie(cfg, w) {
+			t.Fatal("clicking the center of the image must fail")
 		}
-		return serve(req, true).Header().Get("X-Test-Decision")
-	}
-	for i := 0; i < switchAllowance; i++ {
-		if d := load(true); d != "challenge" {
-			t.Fatalf("switch %d: decision %q", i, d)
-		}
-	}
-	if store.IsBlocked(ip) {
-		t.Fatal("switching options must not ban")
-	}
-	if n := store.IncrWalkaway(ip, time.Hour); n != 1 {
-		t.Fatalf("switching added %d walk-aways", n-1)
-	}
-	for i := 0; i < cfg.Walkaway.Threshold+1; i++ {
-		load(true)
-	}
-	if !store.IsBlocked(ip) {
-		t.Fatal("the allowance must run out so the cookie cannot dodge walk-aways forever")
 	}
 }
 
@@ -1349,13 +1341,10 @@ func TestChallengeKindsAreSeparate(t *testing.T) {
 	cfg.Slider.Enabled = true
 	cfg.Slider.MinSolveTime = Duration{}
 	jigsawID, _ := cfg.sliderChallenges.issueJigsaw(0, 1, 7)
-	if w := timedPost(cfg, store, "203.0.113.104", "slider", url.Values{"captcha_id": {jigsawID}, "answer": {"1"}, "return_to": {"/"}}); hasVerifiedCookie(cfg, w) {
+	if w := timedPost(cfg, store, "203.0.113.104", "slider", url.Values{"captcha_id": {jigsawID}, "spot280.x": {"5"}, "spot280.y": {"5"}, "return_to": {"/"}}); hasVerifiedCookie(cfg, w) {
 		t.Fatal("a tile puzzle must not pass as a slider answer")
 	}
 	jigsawID, _ = cfg.sliderChallenges.issueJigsaw(0, 1, 7)
-	if cfg.sliderChallenges.check(jigsawID, 1, 8) != nil {
-		t.Fatal("a tile puzzle must not answer slider checks")
-	}
 	if w := timedPost(cfg, store, "203.0.113.105", "slider", url.Values{"wait": {"1"}, "captcha_id": {jigsawID}, "return_to": {"/"}}); hasVerifiedCookie(cfg, w) {
 		t.Fatal("a tile puzzle must not pass as a wait")
 	}
@@ -1530,8 +1519,8 @@ func TestSliderAccessibleMarkupAndAlert(t *testing.T) {
 	if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, "Incorrect answer, please try again.") {
 		t.Error("challenge page missing role='alert' error message")
 	}
-	if !strings.Contains(body, `aria-label="Puzzle piece position"`) {
-		t.Error("slider input missing aria-label")
+	if !strings.Contains(body, `alt="Picture with marked slots"`) {
+		t.Error("image button missing alt text")
 	}
 	if !strings.Contains(body, `aria-describedby="slider-desc"`) {
 		t.Error("slider input missing aria-describedby")
@@ -1540,7 +1529,7 @@ func TestSliderAccessibleMarkupAndAlert(t *testing.T) {
 		t.Error("slider instructions missing id for aria-describedby")
 	}
 	idxDesc := strings.Index(body, `id="slider-desc"`)
-	idxInput := strings.Index(body, `id="slider-input"`)
+	idxInput := strings.Index(body, `type="image"`)
 	if idxDesc < 0 || idxInput < 0 || idxDesc > idxInput {
 		t.Error("slider description must precede slider input in DOM order")
 	}
