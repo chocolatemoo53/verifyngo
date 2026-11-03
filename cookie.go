@@ -33,8 +33,7 @@ func cookieBinding(r *http.Request, cfg *Config) string {
 	b := r.UserAgent() + "\n" + r.Header.Get("Accept-Language")
 	if cfg != nil {
 		if ip, _ := clientIP(r, cfg); ip != nil {
-			tor := torKind(r, cfg, ip)
-			if !sharedTorIP(tor, ip) {
+			if torKind(r, cfg, ip) == "" {
 				b += "\n" + clientNetwork(ip)
 			}
 		}

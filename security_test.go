@@ -527,6 +527,26 @@ func TestOnionCircuitsBannedSeparately(t *testing.T) {
 	}
 }
 
+func TestCookieBindingIgnoresOnionCircuits(t *testing.T) {
+	cfg, _, _ := testServer(t, testConfig)
+	cfg.TrustRealIP = true
+	cfg.compiledTrustedProxies = compileWhitelist([]string{"10.0.0.1"})
+	binding := func(host, ip string) string {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = host
+		req.RemoteAddr = "10.0.0.1:1000"
+		req.Header.Set("X-Forwarded-For", ip)
+		return cookieBinding(req, cfg)
+	}
+	onion := "abcdefghijklmnop.onion"
+	if binding(onion, "fc00:dead:beef:4dad::aa") != binding(onion, "fc00:dead:beef:4dad::bb") {
+		t.Error("a new onion circuit must keep the cookie")
+	}
+	if binding("example.com", "203.0.113.5") == binding("example.com", "198.51.100.5") {
+		t.Error("a cookie must stay bound to its network outside Tor")
+	}
+}
+
 func TestSlowUploadSurvivesReadTimeout(t *testing.T) {
 	upload := func(h http.Handler) (int, error) {
 		srv := httptest.NewUnstartedServer(h)
