@@ -527,23 +527,45 @@ func TestOnionCircuitsBannedSeparately(t *testing.T) {
 	}
 }
 
-func TestCookieBindingIgnoresOnionCircuits(t *testing.T) {
+func TestVerifiedCookieSurvivesNetworkChanges(t *testing.T) {
 	cfg, _, _ := testServer(t, testConfig)
 	cfg.TrustRealIP = true
 	cfg.compiledTrustedProxies = compileWhitelist([]string{"10.0.0.1"})
-	binding := func(host, ip string) string {
+	request := func(host, ip string) *http.Request {
 		req := httptest.NewRequest("GET", "/", nil)
 		req.Host = host
 		req.RemoteAddr = "10.0.0.1:1000"
 		req.Header.Set("X-Forwarded-For", ip)
-		return cookieBinding(req, cfg)
+		req.Header.Set("User-Agent", "TestAgent")
+		return req
 	}
+	expiry := time.Now().Add(time.Hour)
 	onion := "abcdefghijklmnop.onion"
-	if binding(onion, "fc00:dead:beef:4dad::aa") != binding(onion, "fc00:dead:beef:4dad::bb") {
-		t.Error("a new onion circuit must keep the cookie")
+	cases := [][3]string{
+		{"example.com", "203.0.113.5", "2001:db8:1::5"},
+		{"example.com", "203.0.113.5", "198.51.100.5"},
+		{onion, "fc00:dead:beef:4dad::aa", "fc00:dead:beef:4dad::bb"},
 	}
-	if binding("example.com", "203.0.113.5") == binding("example.com", "198.51.100.5") {
-		t.Error("a cookie must stay bound to its network outside Tor")
+	for _, c := range cases {
+		cookie := issueCookieValue(request(c[0], c[1]), cfg, expiry, cookieScopeFull)
+		if !validCookieValue(request(c[0], c[2]), cfg, cookie, cookieScopeFull) {
+			t.Errorf("%s: a cookie from %s must stay valid from %s", c[0], c[1], c[2])
+		}
+	}
+
+	other := request("example.com", "203.0.113.5")
+	other.Header.Set("User-Agent", "OtherAgent")
+	cookie := issueCookieValue(request("example.com", "203.0.113.5"), cfg, expiry, cookieScopeFull)
+	if validCookieValue(other, cfg, cookie, cookieScopeFull) {
+		t.Error("a cookie must stay bound to its browser")
+	}
+
+	token := troubleTokenAt(request("example.com", "203.0.113.5"), cfg, time.Now())
+	if _, ok := troubleTokenAge(request("example.com", "198.51.100.5"), cfg, token); ok {
+		t.Error("a wait token must stay bound to its network")
+	}
+	if _, ok := troubleTokenAge(request("example.com", "203.0.113.9"), cfg, token); !ok {
+		t.Error("a wait token must work across one network")
 	}
 }
 
@@ -837,7 +859,7 @@ func TestBannedOrDenyOverridesVerifiedCookie(t *testing.T) {
 	reqTemplate := httptest.NewRequest("GET", "http://example.com/normal", nil)
 	reqTemplate.RemoteAddr = clientIP + ":1234"
 	reqTemplate.Header.Set("User-Agent", "TestAgent")
-	binding := cookieBinding(reqTemplate, cfg)
+	binding := cookieBinding(reqTemplate)
 	cookieVal := signCookie(cfg.CookieSecret, time.Now().Add(time.Hour), cookieScopeFull, "", binding)
 
 	makeReq := func(path string) *httptest.ResponseRecorder {

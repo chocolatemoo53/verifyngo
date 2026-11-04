@@ -905,7 +905,7 @@ func handleJigsawVerify(w http.ResponseWriter, r *http.Request, cfg *Config, sto
 
 func troubleTokenAt(r *http.Request, cfg *Config, at time.Time) string {
 	ts := strconv.FormatInt(at.Unix(), 10)
-	return ts + "." + hex.EncodeToString(cookieMAC(cfg.CookieSecret, "trouble."+ts, cookieBinding(r, cfg)))
+	return ts + "." + hex.EncodeToString(cookieMAC(cfg.CookieSecret, "trouble."+ts, troubleBinding(r, cfg)))
 }
 
 func troubleTokenAge(r *http.Request, cfg *Config, token string) (time.Duration, bool) {
@@ -918,7 +918,7 @@ func troubleTokenAge(r *http.Request, cfg *Config, token string) (time.Duration,
 		return 0, false
 	}
 	got, err := hex.DecodeString(sig)
-	if err != nil || !hmac.Equal(got, cookieMAC(cfg.CookieSecret, "trouble."+ts, cookieBinding(r, cfg))) {
+	if err != nil || !hmac.Equal(got, cookieMAC(cfg.CookieSecret, "trouble."+ts, troubleBinding(r, cfg))) {
 		return 0, false
 	}
 	return time.Since(time.Unix(unix, 0)), true

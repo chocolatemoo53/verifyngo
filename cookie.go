@@ -29,14 +29,14 @@ func isSecureRequest(r *http.Request, cfg *Config) bool {
 	return false
 }
 
-func cookieBinding(r *http.Request, cfg *Config) string {
-	b := r.UserAgent() + "\n" + r.Header.Get("Accept-Language")
-	if cfg != nil {
-		if ip, _ := clientIP(r, cfg); ip != nil {
-			if torKind(r, cfg, ip) == "" {
-				b += "\n" + clientNetwork(ip)
-			}
-		}
+func cookieBinding(r *http.Request) string {
+	return r.UserAgent() + "\n" + r.Header.Get("Accept-Language")
+}
+
+func troubleBinding(r *http.Request, cfg *Config) string {
+	b := cookieBinding(r)
+	if ip, _ := clientIP(r, cfg); ip != nil && torKind(r, cfg, ip) == "" {
+		b += "\n" + clientNetwork(ip)
 	}
 	return b
 }
@@ -93,11 +93,11 @@ func tlsCipherHash(r *http.Request, cfg *Config) string {
 }
 
 func issueCookieValue(r *http.Request, cfg *Config, expiry time.Time, scope string) string {
-	return signCookie(cfg.CookieSecret, expiry, scope, tlsCipherHash(r, cfg), cookieBinding(r, cfg))
+	return signCookie(cfg.CookieSecret, expiry, scope, tlsCipherHash(r, cfg), cookieBinding(r))
 }
 
 func validCookieValue(r *http.Request, cfg *Config, value, scope string) bool {
-	return verifyCookie(cfg.CookieSecret, value, scope, tlsCipherHash(r, cfg), cookieBinding(r, cfg))
+	return verifyCookie(cfg.CookieSecret, value, scope, tlsCipherHash(r, cfg), cookieBinding(r))
 }
 
 func browserMismatch(r *http.Request, cfg *Config) string {
